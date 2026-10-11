@@ -164,8 +164,10 @@ class Client {
   // schema's item model. InvalidState: no confirmed descriptor for the collection.
   // InvalidArgument: the query does not fit the schema, see lastContentError.
   Result<std::vector<std::string>> query(const std::string& collection, const Json& query);
+#if defined(NW_ENABLE_TEST_HOOKS)
   // How many times a node's content was decrypted for reading, by the index or by readNode.
   size_t contentDecryptions() const { return contentDecryptions_; }
+#endif
 
   // Items whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in epoch
   // milliseconds.
@@ -322,7 +324,9 @@ class Client {
   FieldIndex index_;
   // Nodes not in the index because they cannot be read yet.
   std::set<std::string> unindexedNodeIds_;
+#if defined(NW_ENABLE_TEST_HOOKS)
   size_t contentDecryptions_ = 0;
+#endif
 };
 
 }  // namespace nw

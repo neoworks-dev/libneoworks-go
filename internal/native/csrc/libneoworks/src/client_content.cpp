@@ -324,7 +324,9 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (readable.value().empty() && nodeKey == nullptr) {
     return Status::NotFound;
   }
+#if defined(NW_ENABLE_TEST_HOOKS)
   ++contentDecryptions_;
+#endif
   return decodeContent(*descriptor.value(), readable.value(), lastContentError_);
 }
 

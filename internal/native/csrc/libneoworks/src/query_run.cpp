@@ -7,7 +7,24 @@ namespace nw {
 
 namespace {
 
-// Null is a value of its own: it equals only null, and `not` matches it.
+// SQL's three-valued logic, as Prisma has it: comparing a missing value with anything but null
+// is unknown, `NOT` keeps unknown unknown, and only true selects an item.
+enum class Truth { False, True, Unknown };
+
+Truth truthOf(bool holds) {
+  if (holds) {
+    return Truth::True;
+  }
+  return Truth::False;
+}
+
+Truth negated(Truth truth) {
+  if (truth == Truth::Unknown) {
+    return Truth::Unknown;
+  }
+  return truthOf(truth == Truth::False);
+}
+
 bool sameValue(const FieldTest& test, const Comparable* value, const std::optional<Comparable>& operand) {
   if (value == nullptr || !operand.has_value()) {
     return value == nullptr && !operand.has_value();
@@ -68,17 +85,44 @@ bool matchesPresentValue(const FieldTest& test, const Comparable& value) {
   return orderingHolds(test.filterOperator, compareValues(folded, operand));
 }
 
-bool matchesTest(const FieldTest& test, const Comparable* value) {
-  if (test.filterOperator == FilterOperator::Equals || test.filterOperator == FilterOperator::In) {
-    return equalsAny(test, value);
+bool isEquality(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::Equals || filterOperator == FilterOperator::In;
+}
+
+bool isInequality(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::Not || filterOperator == FilterOperator::NotIn;
+}
+
+bool hasNullOperand(const FieldTest& test) {
+  return std::any_of(test.operands.begin(), test.operands.end(),
+                     [](const std::optional<Comparable>& operand) { return !operand.has_value(); });
+}
+
+// A missing value is known only against a null operand: `equals: null` holds, `not: null` fails.
+Truth missingValueTruth(const FieldTest& test) {
+  if (!hasNullOperand(test)) {
+    return Truth::Unknown;
   }
-  if (test.filterOperator == FilterOperator::Not || test.filterOperator == FilterOperator::NotIn) {
-    return !equalsAny(test, value);
+  if (isEquality(test.filterOperator)) {
+    return Truth::True;
   }
+  if (isInequality(test.filterOperator)) {
+    return Truth::False;
+  }
+  return Truth::Unknown;
+}
+
+Truth testTruth(const FieldTest& test, const Comparable* value) {
   if (value == nullptr) {
-    return false;
+    return missingValueTruth(test);
   }
-  return matchesPresentValue(test, *value);
+  if (isEquality(test.filterOperator)) {
+    return truthOf(equalsAny(test, value));
+  }
+  if (isInequality(test.filterOperator)) {
+    return truthOf(!equalsAny(test, value));
+  }
+  return truthOf(matchesPresentValue(test, *value));
 }
 
 const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal) {
@@ -89,44 +133,69 @@ const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal) {
   return &found->second;
 }
 
-bool matchesParentId(const FieldTest& test, const IndexedNode& node) {
+Truth parentIdTruth(const FieldTest& test, const IndexedNode& node) {
   if (!node.parentId.has_value()) {
-    return matchesTest(test, nullptr);
+    return testTruth(test, nullptr);
   }
   Comparable parentId;
   parentId.kind = Comparable::Kind::Text;
   parentId.text = *node.parentId;
-  return matchesTest(test, &parentId);
+  return testTruth(test, &parentId);
 }
 
-bool matches(const Condition& condition, const IndexedNode& node, const IndexedNode* parent);
+Truth conditionTruth(const Condition& condition, const IndexedNode& node, const IndexedNode* parent);
 
-bool matchesAll(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
-  return std::all_of(conditions.begin(), conditions.end(),
-                     [&](const Condition& child) { return matches(child, node, parent); });
+Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
+  Truth combined = Truth::True;
+  for (const Condition& child : conditions) {
+    Truth truth = conditionTruth(child, node, parent);
+    if (truth == Truth::False) {
+      return Truth::False;
+    }
+    if (truth == Truth::Unknown) {
+      combined = Truth::Unknown;
+    }
+  }
+  return combined;
 }
 
-bool matchesAny(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
-  return std::any_of(conditions.begin(), conditions.end(),
-                     [&](const Condition& child) { return matches(child, node, parent); });
+Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
+  Truth combined = Truth::False;
+  for (const Condition& child : conditions) {
+    Truth truth = conditionTruth(child, node, parent);
+    if (truth == Truth::True) {
+      return Truth::True;
+    }
+    if (truth == Truth::Unknown) {
+      combined = Truth::Unknown;
+    }
+  }
+  return combined;
 }
 
-bool matches(const Condition& condition, const IndexedNode& node, const IndexedNode* parent) {
+Truth parentIsTruth(const Condition& condition, const IndexedNode* parent) {
+  if (parent == nullptr) {
+    return Truth::False;
+  }
+  return conditionTruth(condition.children.front(), *parent, nullptr);
+}
+
+Truth conditionTruth(const Condition& condition, const IndexedNode& node, const IndexedNode* parent) {
   switch (condition.type) {
     case Condition::Type::All:
-      return matchesAll(condition.children, node, parent);
+      return allTruth(condition.children, node, parent);
     case Condition::Type::Any:
-      return matchesAny(condition.children, node, parent);
+      return anyTruth(condition.children, node, parent);
     case Condition::Type::Not:
-      return !matches(condition.children.front(), node, parent);
+      return negated(conditionTruth(condition.children.front(), node, parent));
     case Condition::Type::Field:
-      return matchesTest(condition.test, valueOf(node, condition.test.ordinal));
+      return testTruth(condition.test, valueOf(node, condition.test.ordinal));
     case Condition::Type::ParentId:
-      return matchesParentId(condition.test, node);
+      return parentIdTruth(condition.test, node);
     case Condition::Type::ParentIs:
-      return parent != nullptr && matches(condition.children.front(), *parent, nullptr);
+      return parentIsTruth(condition, parent);
   }
-  return false;
+  return Truth::False;
 }
 
 // A missing value sorts before any present one.
@@ -165,7 +234,7 @@ std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, c
     if (node.parentId.has_value()) {
       parent = index.find(collection, *node.parentId);
     }
-    if (matches(query.where, node, parent)) {
+    if (conditionTruth(query.where, node, parent) == Truth::True) {
       hits.emplace_back(&nodeId, &node);
     }
   }
