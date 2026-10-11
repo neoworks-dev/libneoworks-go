@@ -82,15 +82,10 @@ Result<std::string> Client::grantCertificateFor(const std::string& principalType
   return Status::NotFound;
 }
 
-Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
+Result<AccessGrant> Client::grantNode(const ShareRequest& request) {
   const Node* node = database_->findNode(request.nodeId);
-  if (node == nullptr || node->deleted) {
+  if (node == nullptr) {
     return Status::NotFound;
-  }
-  bool allowed = canManageAccess(*node) || (request.principalType == "install" && signer_.authorType == "user");
-  bool withinOwnRole = roleRank(request.role) <= roleRank(effectiveRole(request.nodeId));
-  if (!allowed || !withinOwnRole || !isValidRole(request.role)) {
-    return Status::Forbidden;
   }
   Result<std::string> certId = grantCertificateFor(request.principalType, request.principalId);
   if (!certId.ok()) {
@@ -125,6 +120,39 @@ Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
   Status queued = queueGrant(grant.value());
   if (queued != Status::Ok) {
     return queued;
+  }
+  return grant;
+}
+
+// Sharing with a person also grants read access to every node the shared content refers to.
+Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
+  lastContentError_ = CodecError{};
+  const Node* node = database_->findNode(request.nodeId);
+  if (node == nullptr || node->deleted) {
+    return Status::NotFound;
+  }
+  bool allowed = canManageAccess(*node) || (request.principalType == "install" && signer_.authorType == "user");
+  bool withinOwnRole = roleRank(request.role) <= roleRank(effectiveRole(request.nodeId));
+  if (!allowed || !withinOwnRole || !isValidRole(request.role)) {
+    return Status::Forbidden;
+  }
+  std::vector<std::string> referenced;
+  if (request.principalType == "user") {
+    referenced = referencedNodesOf(request.nodeId, request.facets);
+    Status shareable = requireShareable(referenced);
+    if (shareable != Status::Ok) {
+      return shareable;
+    }
+  }
+  Result<AccessGrant> grant = grantNode(request);
+  if (!grant.ok()) {
+    return grant;
+  }
+  for (const std::string& referencedId : referenced) {
+    Status granted = grantReferenced(referencedId, request);
+    if (granted != Status::Ok) {
+      return granted;
+    }
   }
   return grant;
 }
@@ -396,6 +424,9 @@ Result<RotationReport> Client::revokeAccess(const std::string& nodeId, const std
   revoked.revokedAt = nowText();
   database_->putGrant(revoked);
   queueRevocation(nodeId, principalType, principalId);
+  if (principalType == "user") {
+    revokeUnreferenced(nodeId, principalType, principalId, report.value());
+  }
   return report;
 }
 

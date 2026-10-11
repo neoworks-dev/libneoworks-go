@@ -1,5 +1,6 @@
 #include "client.hpp"
 #include "query_fields.hpp"
+#include "references.hpp"
 
 namespace nw {
 
@@ -32,9 +33,13 @@ std::vector<std::string> searchTextsOf(const NodeDescriptor& descriptor, const J
 IndexedNode indexedNodeOf(const Node& node, const NodeDescriptor& descriptor, const Json& content) {
   IndexedNode entry;
   entry.kind = node.kind;
+  entry.model = descriptor.kind;
   entry.parentId = node.parentId;
   entry.values = fieldValuesOf(*descriptor.model, content);
   entry.searchTexts = searchTextsOf(descriptor, content);
+  for (const ContentReference& reference : collectReferences(*descriptor.model, content)) {
+    entry.references.push_back(IndexedReference{reference.fieldOrdinal, reference.nodeId});
+  }
   return entry;
 }
 
@@ -130,7 +135,7 @@ Result<IndexedNode> Client::indexEntryFor(const Node& node) {
   const SchemaDescriptor* schema = descriptorFor(node.collection);
   const NodeDescriptor* descriptor = nullptr;
   if (schema != nullptr) {
-    descriptor = schema->nodeByKind(node.kind);
+    descriptor = schema->nodeByKind(contentKindOf(node));
   }
   if (descriptor == nullptr) {
     return Status::InvalidState;

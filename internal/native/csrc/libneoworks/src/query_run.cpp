@@ -224,11 +224,12 @@ bool sortsBefore(const std::vector<OrderKey>& keys, const IndexedNode& left, con
 
 }  // namespace
 
-std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, const std::string& collection) {
+std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, const std::string& collection,
+                                  const std::string& model) {
   std::vector<std::pair<const std::string*, const IndexedNode*>> hits;
   for (const auto& [nodeId, node] : index.nodesOf(collection)) {
     const IndexedNode* parent = nullptr;
-    if (node.kind != "item") {
+    if (node.model != model) {
       continue;
     }
     if (node.parentId.has_value()) {

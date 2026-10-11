@@ -224,16 +224,21 @@ NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
 
 /* request: {"parentId": id|null, "collection": "@scope/name", "kind": ..., "content": {...},
  *           "blob": {...}?}. content is a JSON object of the schema's model for the kind (contract
- * amendment 7 JSON mapping); roots take none. Writes the new node id. NW_ERR_INVALID_ARGUMENT:
- * the content does not fit the schema, see nw_client_last_content_error. */
+ * amendment 7 JSON mapping); roots take none. An item created with a "blob" is an asset: its
+ * content is the schema's asset model and the blob is its one file. Every other node is created
+ * without a blob. Writes the new node id. NW_ERR_INVALID_ARGUMENT: the content does not fit the
+ * schema (or a blob was given for a node that cannot carry a file), see
+ * nw_client_last_content_error. If the node is shared, the people it is shared with also get
+ * read access to the nodes its content refers to, where the creator may share them. */
 NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer* node_id);
 /* A shortcut under "parentId" to the item "targetId" of the same collection: whoever can open the
  * parent holds at most "targetRole" ("read" | "write") on the target. The creator needs that role
  * on the target. request: {"parentId", "targetId", "targetRole"}. Writes the new node id. */
 NW_API int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id);
-/* request: {"nodeId": id, "changes": {...}, "blob": {...}?, "removeBlob": bool?}. A field in changes
- * replaces the stored value, null clears it, and fields not given keep their value. "blob" replaces
- * the node's blob and "removeBlob" detaches it; giving both is NW_ERR_INVALID_ARGUMENT. */
+/* request: {"nodeId": id, "changes": {...}, "blob": {...}?}. A field in changes replaces the
+ * stored value, null clears it, and fields not given keep their value. "blob" replaces an asset's
+ * file; giving it for a node that is not an asset is NW_ERR_INVALID_ARGUMENT. A reference added to
+ * a shared node is granted to the people it is shared with, as on creation. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 NW_API int nw_client_delete_node(nw_client* client, const char* node_id, int recursive);
 /* Writes the fields of the facets this client can open as one JSON object. Roots and shortcuts read
@@ -260,6 +265,8 @@ NW_API int nw_client_search(nw_client* client, const char* collection, const cha
  * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
  * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive"), AND, OR and NOT
  * lists or objects, and "parent": an id, id operators, or {"is": {...container fields...}}.
+ * "model": "asset" queries the collection's assets, with the fields of its asset model, instead
+ * of its items.
  * Timestamps compare as instants. It reads the in-memory index of field values and decrypts
  * nothing. NW_ERR_INVALID_ARGUMENT: a field the schema does not define or an operator or value
  * that does not fit the field's type, see nw_client_last_content_error for the location.
@@ -283,10 +290,17 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
  * Grants and revocations are queued and sent by the next sync. */
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
- *           "recipient": <identity json>}. Writes the signed AccessGrant JSON. */
+ *           "recipient": <identity json>}. Writes the signed AccessGrant JSON.
+ * Sharing with a user also grants that user read access to every node the shared content refers
+ * to (fields declared ref<Model>), recursively and through shortcuts, unless they already can open
+ * it; the facets limit which fields count. If this holder may not share one of those nodes, nothing
+ * is granted: NW_ERR_FORBIDDEN, and nw_client_last_content_error gives {"path": <that node's id>,
+ * "reason": "asset_not_shareable"}. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
 /* Removes a principal and rotates the node key and every descendant key so it cannot read
- * later writes. report_json: {"rotatedNodeIds": [...], "blobReencryptionRequired": [...]}. */
+ * later writes. A user also loses the grants they hold on nodes the content referred to, unless
+ * another node they can still open refers to the same node; those nodes rotate too and are
+ * listed in the report. report_json: {"rotatedNodeIds": [...], "blobReencryptionRequired": [...]}. */
 NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
                                    const char* principal_id, nw_buffer* report_json);
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);

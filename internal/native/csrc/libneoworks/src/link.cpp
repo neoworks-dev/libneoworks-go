@@ -135,7 +135,7 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
   auto schema = descriptors_.find(node->collection);
   const NodeDescriptor* descriptor = nullptr;
   if (schema != descriptors_.end()) {
-    descriptor = schema->second->nodeByKind(node->kind);
+    descriptor = schema->second->nodeByKind(contentKindOf(*node));
   }
   if (descriptor == nullptr) {
     return Status::InvalidState;

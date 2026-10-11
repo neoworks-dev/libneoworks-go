@@ -31,12 +31,21 @@ int compareValues(const Comparable& left, const Comparable& right);
 // The set fields of one node by field ordinal. Unset and null fields are absent.
 using FieldValues = std::map<uint32_t, Comparable>;
 
+struct IndexedReference {
+  uint32_t fieldOrdinal = 0;
+  std::string nodeId;
+};
+
 struct IndexedNode {
   std::string kind;
   std::optional<std::string> parentId;
   FieldValues values;
   // Lowercased texts of the @neoworks.searchable fields.
   std::vector<std::string> searchTexts;
+  // The nodes its content refers to.
+  std::vector<IndexedReference> references;
+  // The descriptor node kind of its content: "container", "item" or "asset"; empty for roots.
+  std::string model;
 };
 
 // The filterable values of every node this holder can read, per collection. Only values live

@@ -473,7 +473,6 @@ int nw_client_update_node(nw_client* client, const char* request_json) {
       return code(Status::Malformed);
     }
     request.blob = blob.take();
-    request.removeBlob = readBool(*json, "removeBlob").value_or(false);
     return code(client->value->updateNode(request));
   });
 }

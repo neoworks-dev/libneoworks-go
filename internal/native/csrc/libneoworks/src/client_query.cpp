@@ -36,6 +36,21 @@ const NodeDescriptor* itemDescriptorOf(const SchemaDescriptor* schema) {
   return schema->nodeByKind("item");
 }
 
+// The node kind a query runs over: "item" unless the query asks for "asset" with its "model" member.
+Result<std::string> queriedModelOf(const Json& query, CodecError& error) {
+  auto requested = query.find("model");
+  if (!query.is_object() || requested == query.end()) {
+    return std::string("item");
+  }
+  if (requested->is_string() && (*requested == "item" || *requested == "asset")) {
+    return requested->get<std::string>();
+  }
+  error.status = Status::InvalidArgument;
+  error.path = "model";
+  error.reason = "must be \"item\" or \"asset\"";
+  return Status::InvalidArgument;
+}
+
 }  // namespace
 
 Result<std::vector<std::string>> Client::query(const std::string& collection, const Json& query) {
@@ -47,11 +62,15 @@ Result<std::vector<std::string>> Client::query(const std::string& collection, co
     lastContentError_.reason = "no confirmed descriptor for the collection";
     return Status::InvalidState;
   }
-  const NodeDescriptor* item = itemDescriptorOf(schema);
-  if (item == nullptr) {
+  Result<std::string> model = queriedModelOf(query, lastContentError_);
+  if (!model.ok()) {
+    return model.status();
+  }
+  const NodeDescriptor* queried = schema->nodeByKind(model.value());
+  if (queried == nullptr) {
     lastContentError_.status = Status::InvalidArgument;
     lastContentError_.path = collection;
-    lastContentError_.reason = "the schema has no item model";
+    lastContentError_.reason = "the schema has no " + model.value() + " model";
     return Status::InvalidArgument;
   }
   const NodeDescriptor* container = schema->nodeByKind("container");
@@ -59,11 +78,15 @@ Result<std::vector<std::string>> Client::query(const std::string& collection, co
   if (container != nullptr) {
     containerModel = container->model;
   }
-  Result<Query> compiled = compileQuery(query, *item->model, containerModel, lastContentError_);
+  Json conditions = query;
+  if (conditions.is_object()) {
+    conditions.erase("model");
+  }
+  Result<Query> compiled = compileQuery(conditions, *queried->model, containerModel, lastContentError_);
   if (!compiled.ok()) {
     return compiled.status();
   }
-  return runQuery(compiled.value(), index_, collection);
+  return runQuery(compiled.value(), index_, collection, model.value());
 }
 
 std::vector<std::string> Client::queryRange(const std::string& collection, int64_t rangeStart, int64_t rangeEnd) {
@@ -76,7 +99,7 @@ std::vector<std::string> Client::queryRange(const std::string& collection, int64
     std::optional<int64_t> start = millisOf(entry, descriptor->timeRange->start);
     std::optional<int64_t> end = millisOf(entry, descriptor->timeRange->end);
     bool inRange = start.has_value() && end.has_value() && overlaps(*start, *end, rangeStart, rangeEnd);
-    if (entry.kind == "item" && inRange) {
+    if (entry.model == "item" && inRange) {
       matches.push_back(nodeId);
     }
   }
@@ -92,7 +115,7 @@ std::vector<std::string> Client::search(const std::string& collection, const std
   for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
     bool found = std::any_of(entry.searchTexts.begin(), entry.searchTexts.end(),
                              [&](const std::string& text) { return text.find(lowered) != std::string::npos; });
-    if (entry.kind == "item" && found) {
+    if (entry.model == "item" && found) {
       matches.push_back(nodeId);
     }
   }

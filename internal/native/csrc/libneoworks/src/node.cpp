@@ -49,6 +49,15 @@ bool isValidKind(std::string_view kind) { return isOneOf(kKinds, kind); }
 bool isValidPrincipalType(std::string_view principalType) { return isOneOf(kPrincipalTypes, principalType); }
 bool isShortcut(const Node& node) { return node.targetId.has_value(); }
 
+std::string contentKindFor(std::string_view kind, bool carriesFile) {
+  if (kind == "item" && carriesFile) {
+    return "asset";
+  }
+  return std::string(kind);
+}
+
+std::string contentKindOf(const Node& node) { return contentKindFor(node.kind, node.blob.has_value()); }
+
 Result<FacetMap> parseContent(ByteView content) {
   FacetMap facets;
   wire::Reader reader(content);

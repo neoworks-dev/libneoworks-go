@@ -25,6 +25,7 @@ struct CreateNodeRequest {
   std::string kind;
   // A JSON object of the collection's model for `kind`. Roots carry no content.
   Json content = Json::object();
+  // An item created with a file is an asset; every other node is created without one.
   std::optional<BlobDescriptor> blob;
 };
 
@@ -41,9 +42,8 @@ struct UpdateNodeRequest {
   // The top-level fields to change. A given field replaces the stored value, null clears it,
   // and fields not given keep their value.
   Json changes = Json::object();
+  // Replaces an asset's file. InvalidArgument for a node that is not an asset.
   std::optional<BlobDescriptor> blob;
-  // Detaches the node's blob. Cannot be combined with `blob`.
-  bool removeBlob = false;
 };
 
 enum class PinState { New, Match, Changed };
@@ -291,6 +291,36 @@ class Client {
   Result<std::vector<RotationStep>> planRotation(const std::string& nodeId, const std::string& removedType,
                                                  const std::string& removedId);
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
+  // Writes and queues the grant described by `request`; the caller checked the right to share.
+  Result<AccessGrant> grantNode(const ShareRequest& request);
+  // Sharing follows references (client_references.cpp).
+  struct ReferenceWalk;
+  using FacetTags = std::optional<std::vector<uint32_t>>;
+  // The nodes outside the subtree of `startId` that its content refers to, directly or through
+  // other referenced nodes and shortcuts, in discovery order. `facets` limits the references of
+  // the starting subtree to fields in those facets. References to nodes that are not here or are
+  // deleted are left out.
+  std::vector<std::string> referencedNodesOf(const std::string& startId, const FacetTags& facets) const;
+  void walkSubtree(ReferenceWalk& walk, const std::string& rootId, const FacetTags& facets) const;
+  void walkNode(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
+  void walkReferences(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
+  void walkReference(ReferenceWalk& walk, const std::string& nodeId) const;
+  bool isWithin(const std::string& nodeId, const std::string& ancestorId) const;
+  // Refuses with the node as `lastContentError` path and "asset_not_shareable" when this holder
+  // cannot hand out one of the nodes.
+  Status requireShareable(const std::vector<std::string>& nodeIds);
+  bool principalHasAccess(const Node& node, const std::string& principalType, const std::string& principalId) const;
+  bool hasActiveGrant(const std::string& nodeId, const std::string& principalType,
+                      const std::string& principalId) const;
+  bool isReferencedForPrincipal(const std::string& nodeId, const std::string& principalType,
+                                const std::string& principalId) const;
+  Status grantReferenced(const std::string& nodeId, const ShareRequest& share);
+  // Gives the people a node is shared with read access to what it refers to, where this holder
+  // may share that. What it may not share is left out; the write itself never fails for it.
+  void grantReferencesToHolders(const std::string& nodeId);
+  std::vector<std::string> peopleWithAccessTo(const Node& node) const;
+  void revokeUnreferenced(const std::string& startId, const std::string& principalType,
+                          const std::string& principalId, RotationReport& report);
   Status parentForStep(const RotationStep& step,
                        const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
                        SymmetricKey& parentKey, uint32_t& parentEpoch);

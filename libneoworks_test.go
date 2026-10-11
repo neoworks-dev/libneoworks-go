@@ -190,6 +190,30 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 	}
 }
 
+func TestQueryOverAssetsNeedsAnAssetModel(t *testing.T) {
+	client := newTestClient(t)
+	collection := "@neoworks/calendar"
+	descriptor := readDescriptor(t)
+	if _, err := client.RegisterDescriptor(collection, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteDescriptorCheck(collection, 200, descriptor); err != nil {
+		t.Fatal(err)
+	}
+
+	var contentError *ContentError
+	_, err := client.Query(collection, Query{Model: "asset"})
+	if !errors.As(err, &contentError) || !errors.Is(err, StatusInvalidArgument) || contentError.Reason != "the schema has no asset model" {
+		t.Fatalf("a schema without an asset model: got %v", err)
+	}
+	if _, err := client.Query(collection, Query{Model: "container"}); !errors.Is(err, StatusInvalidArgument) {
+		t.Fatalf("an unknown model: got %v", err)
+	}
+	if ids, err := client.Query(collection, Query{Model: "item"}); err != nil || len(ids) != 0 {
+		t.Fatalf("the item model: got %v %v", ids, err)
+	}
+}
+
 type recordingTransport struct {
 	requests []Request
 	status   int

@@ -57,8 +57,9 @@ struct Query {
 Result<Query> compileQuery(const Json& json, const ModelDescriptor& item, const ModelDescriptor* container,
                            CodecError& error);
 
-// The ids of the entries of `collection` that are items and match, in `query.orderBy` order and
-// otherwise in id order.
-std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, const std::string& collection);
+// The ids of the entries of `collection` whose content is described by the `model` node kind
+// ("item" or "asset") and that match, in `query.orderBy` order and otherwise in id order.
+std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, const std::string& collection,
+                                  const std::string& model);
 
 }  // namespace nw
