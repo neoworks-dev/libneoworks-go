@@ -55,6 +55,8 @@ Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::str
     check = DescriptorCheck{registered.descriptorHash, std::move(request)};
   }
   descriptors_[collection] = std::move(registered);
+  resetIndexOf(collection);
+  indexPendingNodes();
   return check;
 }
 
@@ -71,7 +73,9 @@ Status Client::completeDescriptorCheck(const std::string& collection, const Http
     return Status::IoFailure;
   }
   registered.confirmed = true;
-  return database_->acceptDescriptor(collection, registered.descriptorHash);
+  Status accepted = database_->acceptDescriptor(collection, registered.descriptorHash);
+  indexPendingNodes();
+  return accepted;
 }
 
 const SchemaDescriptor* Client::descriptorFor(const std::string& collection) const {
@@ -147,6 +151,7 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
     return stored;
   }
   keyring_.addNodeKey(node.id, node.epoch, nodeKey.clone());
+  indexPendingNodes();
   if (isRoot) {
     Status granted = createOwnerGrant(node, nodeKey);
     if (granted != Status::Ok) {
@@ -319,6 +324,7 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (readable.value().empty() && nodeKey == nullptr) {
     return Status::NotFound;
   }
+  ++contentDecryptions_;
   return decodeContent(*descriptor.value(), readable.value(), lastContentError_);
 }
 

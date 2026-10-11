@@ -3,6 +3,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "account.hpp"
 #include "database.hpp"
 #include "descriptor.hpp"
+#include "field_index.hpp"
 #include "http.hpp"
 #include "install.hpp"
 #include "keyring.hpp"
@@ -131,7 +133,7 @@ class Client {
   Status completeDescriptorCheck(const std::string& collection, const HttpResponse& response);
   // The descriptor of `collection` once confirmed, nullptr before.
   const SchemaDescriptor* descriptorFor(const std::string& collection) const;
-  // Why the last create, update or read of content was rejected.
+  // Why the last create, update, read of content or query was rejected.
   const CodecError& lastContentError() const { return lastContentError_; }
 
   Result<std::string> createNode(const CreateNodeRequest& request);
@@ -154,6 +156,16 @@ class Client {
   // Role this principal holds on the node: own grants on the node or an ancestor, and
   // through shortcuts to it, capped by certificate scopes. Empty string when none.
   std::string effectiveRole(const std::string& nodeId) const;
+
+  // The ids of the items of `collection` matching `query`, a Prisma-style
+  // `{ where, orderBy, take }` (see query.hpp), read from the in-memory index of the values of
+  // every node this holder could open; nothing is decrypted. Only items are returned: containers
+  // are indexed so that `where.parent.is` can filter on their fields. Fields are those of the
+  // schema's item model. InvalidState: no confirmed descriptor for the collection.
+  // InvalidArgument: the query does not fit the schema, see lastContentError.
+  Result<std::vector<std::string>> query(const std::string& collection, const Json& query);
+  // How many times a node's content was decrypted for reading, by the index or by readNode.
+  size_t contentDecryptions() const { return contentDecryptions_; }
 
   // Items whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in epoch
   // milliseconds.
@@ -234,6 +246,20 @@ class Client {
   };
 
   Client() = default;
+
+  // The in-memory index of readable field values. A node is read into it when it is stored or
+  // removed in the database, and again when keys, grants or descriptors that unlock it arrive.
+  void attachIndex();
+  void onNodeChanged(const std::string& nodeId);
+  void onGrantChanged(const std::string& nodeId);
+  void indexNode(const std::string& nodeId);
+  void indexPendingNodes();
+  void resetIndexOf(const std::string& collection);
+  void evictNodesOutOfView(const std::string& collection);
+  enum class OwnGrants { None, Revoked, Active };
+  OwnGrants ownGrantsOn(const std::string& nodeId) const;
+  bool holderLostView(const Node& node) const;
+  Result<IndexedNode> indexEntryFor(const Node& node);
   Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   // The node descriptor for content of `kind` in `collection`; records the reason on failure.
   Result<const NodeDescriptor*> nodeDescriptorFor(const std::string& collection, const std::string& kind);
@@ -293,6 +319,10 @@ class Client {
   int64_t lastOutboxStamp_ = 0;
   std::map<std::string, RegisteredDescriptor> descriptors_;
   CodecError lastContentError_;
+  FieldIndex index_;
+  // Nodes not in the index because they cannot be read yet.
+  std::set<std::string> unindexedNodeIds_;
+  size_t contentDecryptions_ = 0;
 };
 
 }  // namespace nw

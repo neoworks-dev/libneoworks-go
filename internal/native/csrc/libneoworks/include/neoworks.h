@@ -218,7 +218,7 @@ NW_API int nw_client_register_descriptor(nw_client* client, const char* collecti
  * collection; NW_ERR_IO: any other failure, retry later. */
 NW_API int nw_client_complete_descriptor_check(nw_client* client, const char* collection, int http_status,
                                                const uint8_t* body, size_t body_length);
-/* Why the last create, update or read of content failed: {"status", "path", "reason"}, e.g.
+/* Why the last create, update, read of content or query failed: {"status", "path", "reason"}, e.g.
  * {"path": "Event.attendees[2].email", "reason": "is not a valid email"}; null after a success. */
 NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
 
@@ -255,6 +255,16 @@ NW_API int nw_client_query_range(nw_client* client, const char* collection, int6
                                  int64_t end_unix_millis, nw_buffer* json);
 /* Ids of items whose @neoworks.searchable fields contain needle, case-insensitively. */
 NW_API int nw_client_search(nw_client* client, const char* collection, const char* needle, nw_buffer* json);
+/* Ids of the items of collection that match query_json, a Prisma-style filter, as a JSON array:
+ *   {"where": {...}, "orderBy": {"field": "asc"} | [{"field": "desc"}, ...], "take": n}
+ * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
+ * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive"), AND, OR and NOT
+ * lists or objects, and "parent": an id, id operators, or {"is": {...container fields...}}.
+ * Timestamps compare as instants. It reads the in-memory index of field values and decrypts
+ * nothing. NW_ERR_INVALID_ARGUMENT: a field the schema does not define or an operator or value
+ * that does not fit the field's type, see nw_client_last_content_error for the location.
+ * NW_ERR_INVALID_STATE: no confirmed descriptor for the collection. NW_ERR_MALFORMED: not JSON. */
+NW_API int nw_client_query(nw_client* client, const char* collection, const char* query_json, nw_buffer* json);
 /* Wipes keys and all local data for this holder. */
 NW_API int nw_client_wipe(nw_client* client);
 

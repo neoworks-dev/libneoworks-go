@@ -262,6 +262,7 @@ Status Client::acceptPulledGrant(const AccessGrant& grant) {
   bool addressedToMe = grant.principalType == signer_.authorType && grant.principalId == signer_.authorId;
   if (addressedToMe && !grant.revokedAt.has_value()) {
     keyring_.addGrant(grant, encPub_, encSecret_.view());
+    indexPendingNodes();
   }
   return Status::Ok;
 }

@@ -586,6 +586,23 @@ int nw_client_search(nw_client* client, const char* collection, const char* need
   return guarded([&] { return fillJson(json, client->value->search(collection, needle)); });
 }
 
+int nw_client_query(nw_client* client, const char* collection, const char* query_json, nw_buffer* json) {
+  if (!hasArguments(client, collection) || query_json == nullptr || json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    std::optional<Json> query = parseText(query_json);
+    if (!query.has_value()) {
+      return code(Status::Malformed);
+    }
+    Result<std::vector<std::string>> ids = client->value->query(collection, *query);
+    if (!ids.ok()) {
+      return code(ids.status());
+    }
+    return fillJson(json, ids.value());
+  });
+}
+
 int nw_client_wipe(nw_client* client) {
   if (client == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;

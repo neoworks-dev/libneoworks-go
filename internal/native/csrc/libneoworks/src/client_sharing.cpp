@@ -237,6 +237,7 @@ Status Client::applyRotationStep(RotationStep& step, const SymmetricKey* newPare
     return stored;
   }
   keyring_.addNodeKey(node.id, node.epoch, step.newKey.clone());
+  indexPendingNodes();
   for (size_t index = 0; index < step.remainingGrants.size(); ++index) {
     const AccessGrant& old = step.remainingGrants[index];
     GrantRequest request;

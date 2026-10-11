@@ -51,6 +51,7 @@ std::unique_ptr<Client> Client::forInstall(Install install, std::unique_ptr<Loca
   client->signPub_ = install.signPub;
   client->database_ = std::move(database);
   client->keyring_.setShortcutLookup(shortcutLookupOver(*client->database_));
+  client->attachIndex();
   client->restoreKeysFromDatabase();
   return client;
 }
@@ -71,6 +72,7 @@ std::unique_ptr<Client> Client::forAccount(Account account, std::unique_ptr<Loca
   ownPin.pinnedAt = client->nowText();
   client->database_->putPin(ownPin);
   client->account_ = std::move(account);
+  client->attachIndex();
   client->restoreKeysFromDatabase();
   return client;
 }
@@ -94,6 +96,7 @@ Status Client::restoreKeysFromDatabase() {
     }
   }
   restoreNewestCertificate();
+  indexPendingNodes();
   return Status::Ok;
 }
 
@@ -303,6 +306,7 @@ Status Client::acceptGrantBundle(const Json& neoworksGrant, const PublicIdentity
     database_->putGrant(grant);
     keyring_.addGrant(grant, encPub_, encSecret_.view());
   }
+  indexPendingNodes();
   return Status::Ok;
 }
 
