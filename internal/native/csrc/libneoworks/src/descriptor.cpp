@@ -222,11 +222,16 @@ std::optional<ValueShape> parseValue(const Json& json, size_t depth) {
   }
   if (*kind == "scalar") {
     std::optional<Scalar> scalar = parseScalarName(json, "scalar");
-    if (!hasOnlyKeys(json, {"kind", "scalar"}) || !scalar.has_value()) {
+    std::optional<std::string> reference = readString(json, "reference");
+    bool referenceFits = !json.contains("reference") || (reference.has_value() && !reference->empty() && scalar == Scalar::Uuid);
+    if (!hasOnlyKeys(json, {"kind", "scalar", "reference"}) || !scalar.has_value() || !referenceFits) {
       return std::nullopt;
     }
     ValueShape shape;
     shape.scalar = *scalar;
+    if (reference.has_value()) {
+      shape.reference = *reference;
+    }
     return shape;
   }
   if (*kind == "enum") {
@@ -547,7 +552,7 @@ std::optional<NodeDescriptor> parseNode(const Json& json) {
   std::optional<std::string> model = readString(json, "model");
   std::optional<std::vector<uint32_t>> searchable = readOrdinalList(json, "searchable");
   const Json* facets = readArray(json, "facets");
-  bool wellFormed = kind.has_value() && (*kind == "container" || *kind == "item") && model.has_value() &&
+  bool wellFormed = kind.has_value() && (*kind == "container" || *kind == "item" || *kind == "asset") && model.has_value() &&
                     searchable.has_value() && facets != nullptr && parseOptionalOrdinal(json, "title", node.title) &&
                     parseOptionalTimeRange(json, node.timeRange);
   if (!wellFormed) {

@@ -51,6 +51,8 @@ struct ValueShape {
   const ModelDescriptor* model = nullptr;
   uint32_t precision = 0;
   uint32_t scale = 0;
+  // A uuid scalar that names a node of this (qualified) model; empty for any other value.
+  std::string reference;
   std::vector<OneofVariantDescriptor> variants;
 };
 
@@ -120,6 +122,7 @@ struct TimeRangeDescriptor {
   uint32_t end = 0;
 };
 
+// kind is "container", "item" or "asset". An asset is an item that carries exactly one file.
 struct NodeDescriptor {
   std::string kind;
   std::string modelName;

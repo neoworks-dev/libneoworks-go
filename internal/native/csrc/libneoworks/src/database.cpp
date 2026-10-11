@@ -253,7 +253,15 @@ Status LocalDatabase::putNode(Node node, bool dirty) {
   if (dirty) {
     local.revision += 1;
   }
-  return persistLocalNode(local);
+  Status persisted = persistLocalNode(local);
+  notifyNodeChanged(local.node.id);
+  return persisted;
+}
+
+void LocalDatabase::notifyNodeChanged(const std::string& nodeId) const {
+  if (nodeObserver_) {
+    nodeObserver_(nodeId);
+  }
 }
 
 Status LocalDatabase::putRemoteNode(Node node) { return putNode(std::move(node), false); }
@@ -284,7 +292,9 @@ Status LocalDatabase::markRejected(const std::string& nodeId) {
 
 Status LocalDatabase::removeNode(const std::string& nodeId) {
   nodes_.erase(nodeId);
-  return store_->remove("node", nodeId);
+  Status removed = store_->remove("node", nodeId);
+  notifyNodeChanged(nodeId);
+  return removed;
 }
 
 std::vector<std::string> LocalDatabase::childrenOf(const std::string& parentId) const {
@@ -355,7 +365,11 @@ std::vector<std::string> LocalDatabase::allNodeIds() const {
 
 Status LocalDatabase::putGrant(const AccessGrant& grant) {
   grants_[grantKey(grant)] = grant;
-  return store_->put("grant", grantKey(grant), encodeJson(grantToJson(grant)));
+  Status stored = store_->put("grant", grantKey(grant), encodeJson(grantToJson(grant)));
+  if (grantObserver_) {
+    grantObserver_(grant.nodeId);
+  }
+  return stored;
 }
 
 std::vector<AccessGrant> LocalDatabase::grantsForNode(const std::string& nodeId) const {
@@ -577,6 +591,7 @@ std::vector<Node> LocalDatabase::shadowsOf(const std::string& nodeId) const {
 }
 
 Status LocalDatabase::wipe() {
+  std::vector<std::string> removedNodeIds = allNodeIds();
   nodes_.clear();
   grants_.clear();
   pins_.clear();
@@ -589,7 +604,11 @@ Status LocalDatabase::wipe() {
   integrityFailures_.clear();
   acceptedDescriptors_.clear();
   cursor_.clear();
-  return store_->clear();
+  Status cleared = store_->clear();
+  for (const std::string& nodeId : removedNodeIds) {
+    notifyNodeChanged(nodeId);
+  }
+  return cleared;
 }
 
 }  // namespace nw

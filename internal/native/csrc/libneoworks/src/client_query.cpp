@@ -1,7 +1,8 @@
 #include <algorithm>
-#include <cctype>
 
 #include "client.hpp"
+#include "query.hpp"
+#include "query_fields.hpp"
 #include "schema_values.hpp"
 #include "tlv.hpp"
 #include "timeutil.hpp"
@@ -12,68 +13,93 @@ namespace {
 
 constexpr size_t kSafetyCodeGroups = 6;
 
-std::string lowercase(std::string text) {
-  std::transform(text.begin(), text.end(), text.begin(),
-                 [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
-  return text;
-}
-
-std::vector<std::string> searchableTexts(const NodeDescriptor& descriptor, const Json& content) {
-  std::vector<std::string> texts;
-  for (uint32_t ordinal : descriptor.searchable) {
-    const FieldDescriptor* field = descriptor.model->fieldByOrdinal(ordinal);
-    auto value = content.find(field->name);
-    if (value == content.end()) {
-      continue;
-    }
-    if (value->is_string()) {
-      texts.push_back(value->get<std::string>());
-      continue;
-    }
-    for (const Json& element : *value) {
-      texts.push_back(element.get<std::string>());
-    }
-  }
-  return texts;
-}
-
-std::optional<int64_t> timestampField(const ModelDescriptor& model, uint32_t ordinal, const Json& content) {
-  auto value = content.find(model.fieldByOrdinal(ordinal)->name);
-  if (value == content.end() || !value->is_string()) {
+std::optional<int64_t> millisOf(const IndexedNode& entry, uint32_t ordinal) {
+  auto found = entry.values.find(ordinal);
+  if (found == entry.values.end()) {
     return std::nullopt;
   }
-  return timestampToMillis(value->get<std::string>());
+  const WideInteger& integer = found->second.integer;
+  if (integer.negative) {
+    return -static_cast<int64_t>(integer.magnitude);
+  }
+  return static_cast<int64_t>(integer.magnitude);
 }
 
 bool overlaps(int64_t start, int64_t end, int64_t rangeStart, int64_t rangeEnd) {
   return start < rangeEnd && std::max(end, start + 1) > rangeStart;
 }
 
-bool isIndexedItem(const Node& node) { return node.kind == "item" && !node.deleted && !isShortcut(node); }
+const NodeDescriptor* itemDescriptorOf(const SchemaDescriptor* schema) {
+  if (schema == nullptr) {
+    return nullptr;
+  }
+  return schema->nodeByKind("item");
+}
+
+// The node kind a query runs over: "item" unless the query asks for "asset" with its "model" member.
+Result<std::string> queriedModelOf(const Json& query, CodecError& error) {
+  auto requested = query.find("model");
+  if (!query.is_object() || requested == query.end()) {
+    return std::string("item");
+  }
+  if (requested->is_string() && (*requested == "item" || *requested == "asset")) {
+    return requested->get<std::string>();
+  }
+  error.status = Status::InvalidArgument;
+  error.path = "model";
+  error.reason = "must be \"item\" or \"asset\"";
+  return Status::InvalidArgument;
+}
 
 }  // namespace
 
+Result<std::vector<std::string>> Client::query(const std::string& collection, const Json& query) {
+  lastContentError_ = CodecError{};
+  const SchemaDescriptor* schema = descriptorFor(collection);
+  if (schema == nullptr) {
+    lastContentError_.status = Status::InvalidState;
+    lastContentError_.path = collection;
+    lastContentError_.reason = "no confirmed descriptor for the collection";
+    return Status::InvalidState;
+  }
+  Result<std::string> model = queriedModelOf(query, lastContentError_);
+  if (!model.ok()) {
+    return model.status();
+  }
+  const NodeDescriptor* queried = schema->nodeByKind(model.value());
+  if (queried == nullptr) {
+    lastContentError_.status = Status::InvalidArgument;
+    lastContentError_.path = collection;
+    lastContentError_.reason = "the schema has no " + model.value() + " model";
+    return Status::InvalidArgument;
+  }
+  const NodeDescriptor* container = schema->nodeByKind("container");
+  const ModelDescriptor* containerModel = nullptr;
+  if (container != nullptr) {
+    containerModel = container->model;
+  }
+  Json conditions = query;
+  if (conditions.is_object()) {
+    conditions.erase("model");
+  }
+  Result<Query> compiled = compileQuery(conditions, *queried->model, containerModel, lastContentError_);
+  if (!compiled.ok()) {
+    return compiled.status();
+  }
+  return runQuery(compiled.value(), index_, collection, model.value());
+}
+
 std::vector<std::string> Client::queryRange(const std::string& collection, int64_t rangeStart, int64_t rangeEnd) {
   std::vector<std::string> matches;
-  const SchemaDescriptor* schema = descriptorFor(collection);
-  const NodeDescriptor* descriptor = nullptr;
-  if (schema != nullptr) {
-    descriptor = schema->nodeByKind("item");
-  }
+  const NodeDescriptor* descriptor = itemDescriptorOf(descriptorFor(collection));
   if (descriptor == nullptr || !descriptor->timeRange.has_value()) {
     return matches;
   }
-  for (const std::string& nodeId : database_->nodesInCollection(collection)) {
-    Result<Json> content = Status::NotFound;
-    if (isIndexedItem(*database_->findNode(nodeId))) {
-      content = readNode(nodeId);
-    }
-    if (!content.ok()) {
-      continue;
-    }
-    std::optional<int64_t> start = timestampField(*descriptor->model, descriptor->timeRange->start, content.value());
-    std::optional<int64_t> end = timestampField(*descriptor->model, descriptor->timeRange->end, content.value());
-    if (start.has_value() && end.has_value() && overlaps(*start, *end, rangeStart, rangeEnd)) {
+  for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
+    std::optional<int64_t> start = millisOf(entry, descriptor->timeRange->start);
+    std::optional<int64_t> end = millisOf(entry, descriptor->timeRange->end);
+    bool inRange = start.has_value() && end.has_value() && overlaps(*start, *end, rangeStart, rangeEnd);
+    if (entry.model == "item" && inRange) {
       matches.push_back(nodeId);
     }
   }
@@ -82,27 +108,14 @@ std::vector<std::string> Client::queryRange(const std::string& collection, int64
 
 std::vector<std::string> Client::search(const std::string& collection, const std::string& needle) {
   std::vector<std::string> matches;
-  const SchemaDescriptor* schema = descriptorFor(collection);
-  const NodeDescriptor* descriptor = nullptr;
-  if (schema != nullptr) {
-    descriptor = schema->nodeByKind("item");
-  }
-  if (descriptor == nullptr) {
+  if (itemDescriptorOf(descriptorFor(collection)) == nullptr) {
     return matches;
   }
-  std::string lowered = lowercase(needle);
-  for (const std::string& nodeId : database_->nodesInCollection(collection)) {
-    Result<Json> content = Status::NotFound;
-    if (isIndexedItem(*database_->findNode(nodeId))) {
-      content = readNode(nodeId);
-    }
-    if (!content.ok()) {
-      continue;
-    }
-    std::vector<std::string> texts = searchableTexts(*descriptor, content.value());
-    bool found = std::any_of(texts.begin(), texts.end(),
-                             [&](const std::string& text) { return lowercase(text).find(lowered) != std::string::npos; });
-    if (found) {
+  std::string lowered = lowercaseAscii(needle);
+  for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
+    bool found = std::any_of(entry.searchTexts.begin(), entry.searchTexts.end(),
+                             [&](const std::string& text) { return text.find(lowered) != std::string::npos; });
+    if (entry.model == "item" && found) {
       matches.push_back(nodeId);
     }
   }

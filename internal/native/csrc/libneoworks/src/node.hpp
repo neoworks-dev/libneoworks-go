@@ -62,6 +62,10 @@ bool isValidCollection(std::string_view collection);
 bool isValidKind(std::string_view kind);
 bool isValidPrincipalType(std::string_view principalType);
 bool isShortcut(const Node& node);
+// The kind of the descriptor model that describes a node's content: an item that carries a file
+// is an asset, every other node is described by the model of its own kind.
+std::string contentKindFor(std::string_view kind, bool carriesFile);
+std::string contentKindOf(const Node& node);
 
 // Malformed unless the content is LEN fields with ascending, unique facet tags.
 Result<FacetMap> parseContent(ByteView content);

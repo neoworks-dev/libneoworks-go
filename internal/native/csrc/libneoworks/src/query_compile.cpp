@@ -1,0 +1,479 @@
+#include <map>
+
+#include "query.hpp"
+#include "query_fields.hpp"
+
+namespace nw {
+
+namespace {
+
+struct Context {
+  const ModelDescriptor* model = nullptr;
+  // The model `parent.is` filters on; null when the schema has none.
+  const ModelDescriptor* container = nullptr;
+  // False inside `parent.is`, where there is no further parent.
+  bool hasParent = true;
+  CodecError* error = nullptr;
+};
+
+Status fail(const Context& context, const std::string& path, const std::string& reason) {
+  context.error->status = Status::InvalidArgument;
+  context.error->path = path;
+  context.error->reason = reason;
+  return Status::InvalidArgument;
+}
+
+Condition conjunction(std::vector<Condition> children) {
+  Condition condition;
+  condition.type = Condition::Type::All;
+  condition.children = std::move(children);
+  return condition;
+}
+
+Condition negation(Condition child) {
+  Condition condition;
+  condition.type = Condition::Type::Not;
+  condition.children.push_back(std::move(child));
+  return condition;
+}
+
+const std::map<std::string, FilterOperator>& operatorNames() {
+  static const std::map<std::string, FilterOperator> names = {
+      {"equals", FilterOperator::Equals}, {"not", FilterOperator::Not},
+      {"in", FilterOperator::In},         {"notIn", FilterOperator::NotIn},
+      {"lt", FilterOperator::Lt},         {"lte", FilterOperator::Lte},
+      {"gt", FilterOperator::Gt},         {"gte", FilterOperator::Gte},
+      {"contains", FilterOperator::Contains},
+      {"startsWith", FilterOperator::StartsWith},
+      {"endsWith", FilterOperator::EndsWith},
+  };
+  return names;
+}
+
+bool isOrderingOperator(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::Lt || filterOperator == FilterOperator::Lte ||
+         filterOperator == FilterOperator::Gt || filterOperator == FilterOperator::Gte;
+}
+
+bool isTextOperator(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::Contains || filterOperator == FilterOperator::StartsWith ||
+         filterOperator == FilterOperator::EndsWith;
+}
+
+bool isListOperator(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::In || filterOperator == FilterOperator::NotIn;
+}
+
+bool operatorFits(FilterOperator filterOperator, FieldType type) {
+  if (isOrderingOperator(filterOperator)) {
+    return isOrdered(type);
+  }
+  if (isTextOperator(filterOperator)) {
+    return type == FieldType::Text;
+  }
+  return true;
+}
+
+const FieldDescriptor& parentIdField() {
+  static const FieldDescriptor field = [] {
+    FieldDescriptor parentId;
+    parentId.name = "parent";
+    parentId.value.scalar = Scalar::String;
+    return parentId;
+  }();
+  return field;
+}
+
+Result<std::optional<Comparable>> compileOperand(const Context& context, const FieldDescriptor& field, FieldType type,
+                                                 const Json& json, const std::string& path) {
+  if (json.is_null()) {
+    return std::optional<Comparable>();
+  }
+  std::optional<Comparable> operand = toComparable(json, field, type);
+  if (!operand.has_value()) {
+    return fail(context, path, "is not a valid value for field " + field.name);
+  }
+  return operand;
+}
+
+struct FieldFilter {
+  const FieldDescriptor* field = nullptr;
+  FieldType type = FieldType::Text;
+  bool insensitive = false;
+  // Only equals, not, in and notIn apply.
+  bool equalityOnly = false;
+};
+
+Result<Condition> compileOperators(const Context& context, const FieldFilter& filter, const Json& operators,
+                                   const std::string& path);
+
+Result<std::vector<std::optional<Comparable>>> compileOperands(const Context& context, const FieldFilter& filter,
+                                                               FilterOperator filterOperator, const Json& value,
+                                                               const std::string& path) {
+  std::vector<std::optional<Comparable>> operands;
+  if (!isListOperator(filterOperator)) {
+    Result<std::optional<Comparable>> operand = compileOperand(context, *filter.field, filter.type, value, path);
+    if (!operand.ok()) {
+      return operand.status();
+    }
+    operands.push_back(operand.take());
+    return operands;
+  }
+  if (!value.is_array()) {
+    return fail(context, path, "expects an array");
+  }
+  for (size_t index = 0; index < value.size(); ++index) {
+    std::string elementPath = path + "[" + std::to_string(index) + "]";
+    Result<std::optional<Comparable>> operand =
+        compileOperand(context, *filter.field, filter.type, value[index], elementPath);
+    if (!operand.ok()) {
+      return operand.status();
+    }
+    operands.push_back(operand.take());
+  }
+  return operands;
+}
+
+void foldOperands(FieldTest& test) {
+  for (std::optional<Comparable>& operand : test.operands) {
+    if (operand.has_value() && operand->kind == Comparable::Kind::Text) {
+      operand->text = lowercaseAscii(operand->text);
+    }
+  }
+}
+
+Result<Condition> compileOperator(const Context& context, const FieldFilter& filter, const std::string& name,
+                                  const Json& value, const std::string& path) {
+  auto found = operatorNames().find(name);
+  if (found == operatorNames().end()) {
+    return fail(context, path, "unknown operator " + name);
+  }
+  FilterOperator filterOperator = found->second;
+  if (filterOperator == FilterOperator::Not && value.is_object()) {
+    Result<Condition> nested = compileOperators(context, filter, value, path);
+    if (!nested.ok()) {
+      return nested;
+    }
+    return negation(nested.take());
+  }
+  bool fits = operatorFits(filterOperator, filter.type);
+  bool equality = filterOperator == FilterOperator::Equals || filterOperator == FilterOperator::Not || isListOperator(filterOperator);
+  if (!fits || (filter.equalityOnly && !equality)) {
+    return fail(context, path, "operator " + name + " does not apply to field " + filter.field->name);
+  }
+  Result<std::vector<std::optional<Comparable>>> operands = compileOperands(context, filter, filterOperator, value, path);
+  if (!operands.ok()) {
+    return operands.status();
+  }
+  bool needsValue = isOrderingOperator(filterOperator) || isTextOperator(filterOperator);
+  if (needsValue && !operands.value().front().has_value()) {
+    return fail(context, path, "operator " + name + " cannot compare with null");
+  }
+  Condition condition;
+  condition.type = Condition::Type::Field;
+  condition.test.ordinal = filter.field->ordinal;
+  condition.test.filterOperator = filterOperator;
+  condition.test.operands = operands.take();
+  condition.test.insensitive = filter.insensitive;
+  if (filter.insensitive) {
+    foldOperands(condition.test);
+  }
+  return condition;
+}
+
+Status readMode(const Context& context, FieldFilter& filter, const Json& operators, const std::string& path) {
+  auto mode = operators.find("mode");
+  if (mode == operators.end()) {
+    return Status::Ok;
+  }
+  std::string modePath = path + ".mode";
+  bool known = mode->is_string() && (mode->get<std::string>() == "default" || mode->get<std::string>() == "insensitive");
+  if (!known) {
+    return fail(context, modePath, "must be \"default\" or \"insensitive\"");
+  }
+  if (filter.type != FieldType::Text) {
+    return fail(context, modePath, "applies to text fields only");
+  }
+  filter.insensitive = mode->get<std::string>() == "insensitive";
+  return Status::Ok;
+}
+
+Result<Condition> compileOperators(const Context& context, const FieldFilter& inherited, const Json& operators,
+                                   const std::string& path) {
+  FieldFilter filter = inherited;
+  Status modeRead = readMode(context, filter, operators, path);
+  if (modeRead != Status::Ok) {
+    return modeRead;
+  }
+  std::vector<Condition> tests;
+  for (const auto& [name, value] : operators.items()) {
+    if (name == "mode") {
+      continue;
+    }
+    Result<Condition> test = compileOperator(context, filter, name, value, path + "." + name);
+    if (!test.ok()) {
+      return test;
+    }
+    tests.push_back(test.take());
+  }
+  return conjunction(std::move(tests));
+}
+
+Result<Condition> compileFieldFilter(const Context& context, const FieldFilter& filter, const Json& value,
+                                     const std::string& path) {
+  if (value.is_object()) {
+    return compileOperators(context, filter, value, path);
+  }
+  Json equals = Json::object();
+  equals["equals"] = value;
+  return compileOperators(context, filter, equals, path);
+}
+
+Result<Condition> compileField(const Context& context, const std::string& name, const Json& value,
+                               const std::string& path) {
+  const FieldDescriptor* field = context.model->fieldByName(name);
+  if (field == nullptr) {
+    return fail(context, path, "unknown field " + name + " on " + context.model->name);
+  }
+  std::optional<FieldType> type = filterableType(*field);
+  if (!type.has_value()) {
+    return fail(context, path, "field " + name + " cannot be filtered");
+  }
+  FieldFilter filter;
+  filter.field = field;
+  filter.type = *type;
+  return compileFieldFilter(context, filter, value, path);
+}
+
+Result<Condition> compileWhere(const Context& context, const Json& json, const std::string& path);
+
+Result<Condition> compileParentIs(const Context& context, const Json& value, const std::string& path) {
+  if (context.container == nullptr) {
+    return fail(context, path, "the schema has no container model to filter on");
+  }
+  Context parentContext;
+  parentContext.model = context.container;
+  parentContext.hasParent = false;
+  parentContext.error = context.error;
+  Result<Condition> condition = compileWhere(parentContext, value, path);
+  if (!condition.ok()) {
+    return condition;
+  }
+  Condition parentIs;
+  parentIs.type = Condition::Type::ParentIs;
+  parentIs.children.push_back(condition.take());
+  return parentIs;
+}
+
+Condition asParentIdTests(Condition condition) {
+  if (condition.type == Condition::Type::Field) {
+    condition.type = Condition::Type::ParentId;
+    return condition;
+  }
+  for (Condition& child : condition.children) {
+    child = asParentIdTests(std::move(child));
+  }
+  return condition;
+}
+
+Result<Condition> compileParentIds(const Context& context, const Json& value, const std::string& path) {
+  FieldFilter filter;
+  filter.field = &parentIdField();
+  filter.type = FieldType::Text;
+  filter.equalityOnly = true;
+  Result<Condition> operators = compileFieldFilter(context, filter, value, path);
+  if (!operators.ok()) {
+    return operators;
+  }
+  return asParentIdTests(operators.take());
+}
+
+Result<Condition> compileParent(const Context& context, const Json& value, const std::string& path) {
+  if (!context.hasParent) {
+    return fail(context, path, "unknown field parent on " + context.model->name);
+  }
+  if (!value.is_object()) {
+    return compileParentIds(context, value, path);
+  }
+  Json idOperators = value;
+  idOperators.erase("is");
+  Result<Condition> ids = compileParentIds(context, idOperators, path);
+  if (!ids.ok() || !value.contains("is")) {
+    return ids;
+  }
+  Result<Condition> parentIs = compileParentIs(context, value.at("is"), path + ".is");
+  if (!parentIs.ok()) {
+    return parentIs;
+  }
+  return conjunction({ids.take(), parentIs.take()});
+}
+
+Result<std::vector<Condition>> compileConditionList(const Context& context, const Json& value, const std::string& path) {
+  std::vector<Condition> conditions;
+  if (value.is_object()) {
+    Result<Condition> single = compileWhere(context, value, path);
+    if (!single.ok()) {
+      return single.status();
+    }
+    conditions.push_back(single.take());
+    return conditions;
+  }
+  if (!value.is_array()) {
+    return fail(context, path, "expects an object or an array of objects");
+  }
+  for (size_t index = 0; index < value.size(); ++index) {
+    Result<Condition> element = compileWhere(context, value[index], path + "[" + std::to_string(index) + "]");
+    if (!element.ok()) {
+      return element.status();
+    }
+    conditions.push_back(element.take());
+  }
+  return conditions;
+}
+
+Result<Condition> compileLogical(const Context& context, const std::string& name, const Json& value,
+                                 const std::string& path) {
+  Result<std::vector<Condition>> conditions = compileConditionList(context, value, path);
+  if (!conditions.ok()) {
+    return conditions.status();
+  }
+  if (name == "AND") {
+    return conjunction(conditions.take());
+  }
+  if (name == "OR") {
+    Condition any;
+    any.type = Condition::Type::Any;
+    any.children = conditions.take();
+    return any;
+  }
+  std::vector<Condition> negated;
+  for (Condition& condition : conditions.value()) {
+    negated.push_back(negation(std::move(condition)));
+  }
+  return conjunction(std::move(negated));
+}
+
+Result<Condition> compileEntry(const Context& context, const std::string& name, const Json& value,
+                               const std::string& path) {
+  if (name == "AND" || name == "OR" || name == "NOT") {
+    return compileLogical(context, name, value, path);
+  }
+  if (name == "parent") {
+    return compileParent(context, value, path);
+  }
+  return compileField(context, name, value, path);
+}
+
+Result<Condition> compileWhere(const Context& context, const Json& json, const std::string& path) {
+  if (!json.is_object()) {
+    return fail(context, path, "expects an object");
+  }
+  std::vector<Condition> conditions;
+  for (const auto& [name, value] : json.items()) {
+    Result<Condition> entry = compileEntry(context, name, value, path + "." + name);
+    if (!entry.ok()) {
+      return entry;
+    }
+    conditions.push_back(entry.take());
+  }
+  return conjunction(std::move(conditions));
+}
+
+Status compileOrderKeys(const Context& context, const Json& entry, const std::string& path, std::vector<OrderKey>& keys) {
+  if (!entry.is_object()) {
+    return fail(context, path, "expects an object of field and direction");
+  }
+  for (const auto& [name, direction] : entry.items()) {
+    std::string keyPath = path + "." + name;
+    const FieldDescriptor* field = context.model->fieldByName(name);
+    if (field == nullptr) {
+      return fail(context, keyPath, "unknown field " + name + " on " + context.model->name);
+    }
+    std::optional<FieldType> type = filterableType(*field);
+    if (!type.has_value()) {
+      return fail(context, keyPath, "field " + name + " cannot be ordered");
+    }
+    bool validDirection = direction.is_string() && (direction == "asc" || direction == "desc");
+    if (!validDirection) {
+      return fail(context, keyPath, "must be \"asc\" or \"desc\"");
+    }
+    keys.push_back(OrderKey{field->ordinal, direction == "desc"});
+  }
+  return Status::Ok;
+}
+
+Result<std::vector<OrderKey>> compileOrderBy(const Context& context, const Json& json, const std::string& path) {
+  std::vector<OrderKey> keys;
+  if (json.is_object()) {
+    Status compiled = compileOrderKeys(context, json, path, keys);
+    if (compiled != Status::Ok) {
+      return compiled;
+    }
+    return keys;
+  }
+  if (!json.is_array()) {
+    return fail(context, path, "expects an object or an array of objects");
+  }
+  for (size_t index = 0; index < json.size(); ++index) {
+    Status compiled = compileOrderKeys(context, json[index], path + "[" + std::to_string(index) + "]", keys);
+    if (compiled != Status::Ok) {
+      return compiled;
+    }
+  }
+  return keys;
+}
+
+Status compileTake(const Context& context, const Json& json, Query& query) {
+  if (!json.is_number_unsigned()) {
+    return fail(context, "take", "must be a non-negative integer");
+  }
+  query.take = json.get<size_t>();
+  return Status::Ok;
+}
+
+Status compileSection(const Context& context, const std::string& name, const Json& value, Query& query) {
+  if (name == "where") {
+    Result<Condition> where = compileWhere(context, value, "where");
+    if (!where.ok()) {
+      return where.status();
+    }
+    query.where = where.take();
+    return Status::Ok;
+  }
+  if (name == "orderBy") {
+    Result<std::vector<OrderKey>> orderBy = compileOrderBy(context, value, "orderBy");
+    if (!orderBy.ok()) {
+      return orderBy.status();
+    }
+    query.orderBy = orderBy.take();
+    return Status::Ok;
+  }
+  if (name == "take") {
+    return compileTake(context, value, query);
+  }
+  return fail(context, name, "unknown query key " + name + ", expected where, orderBy or take");
+}
+
+}  // namespace
+
+Result<Query> compileQuery(const Json& json, const ModelDescriptor& item, const ModelDescriptor* container,
+                           CodecError& error) {
+  error = CodecError{};
+  Context context;
+  context.model = &item;
+  context.container = container;
+  context.error = &error;
+  if (!json.is_object()) {
+    return fail(context, "", "a query is an object with where, orderBy and take");
+  }
+  Query query;
+  for (const auto& [name, value] : json.items()) {
+    Status compiled = compileSection(context, name, value, query);
+    if (compiled != Status::Ok) {
+      return compiled;
+    }
+  }
+  return query;
+}
+
+}  // namespace nw

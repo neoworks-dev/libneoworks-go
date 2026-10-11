@@ -218,22 +218,27 @@ NW_API int nw_client_register_descriptor(nw_client* client, const char* collecti
  * collection; NW_ERR_IO: any other failure, retry later. */
 NW_API int nw_client_complete_descriptor_check(nw_client* client, const char* collection, int http_status,
                                                const uint8_t* body, size_t body_length);
-/* Why the last create, update or read of content failed: {"status", "path", "reason"}, e.g.
+/* Why the last create, update, read of content or query failed: {"status", "path", "reason"}, e.g.
  * {"path": "Event.attendees[2].email", "reason": "is not a valid email"}; null after a success. */
 NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
 
 /* request: {"parentId": id|null, "collection": "@scope/name", "kind": ..., "content": {...},
  *           "blob": {...}?}. content is a JSON object of the schema's model for the kind (contract
- * amendment 7 JSON mapping); roots take none. Writes the new node id. NW_ERR_INVALID_ARGUMENT:
- * the content does not fit the schema, see nw_client_last_content_error. */
+ * amendment 7 JSON mapping); roots take none. An item created with a "blob" is an asset: its
+ * content is the schema's asset model and the blob is its one file. Every other node is created
+ * without a blob. Writes the new node id. NW_ERR_INVALID_ARGUMENT: the content does not fit the
+ * schema (or a blob was given for a node that cannot carry a file), see
+ * nw_client_last_content_error. If the node is shared, the people it is shared with also get
+ * read access to the nodes its content refers to, where the creator may share them. */
 NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer* node_id);
 /* A shortcut under "parentId" to the item "targetId" of the same collection: whoever can open the
  * parent holds at most "targetRole" ("read" | "write") on the target. The creator needs that role
  * on the target. request: {"parentId", "targetId", "targetRole"}. Writes the new node id. */
 NW_API int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id);
-/* request: {"nodeId": id, "changes": {...}, "blob": {...}?, "removeBlob": bool?}. A field in changes
- * replaces the stored value, null clears it, and fields not given keep their value. "blob" replaces
- * the node's blob and "removeBlob" detaches it; giving both is NW_ERR_INVALID_ARGUMENT. */
+/* request: {"nodeId": id, "changes": {...}, "blob": {...}?}. A field in changes replaces the
+ * stored value, null clears it, and fields not given keep their value. "blob" replaces an asset's
+ * file; giving it for a node that is not an asset is NW_ERR_INVALID_ARGUMENT. A reference added to
+ * a shared node is granted to the people it is shared with, as on creation. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 NW_API int nw_client_delete_node(nw_client* client, const char* node_id, int recursive);
 /* Writes the fields of the facets this client can open as one JSON object. Roots and shortcuts read
@@ -255,6 +260,18 @@ NW_API int nw_client_query_range(nw_client* client, const char* collection, int6
                                  int64_t end_unix_millis, nw_buffer* json);
 /* Ids of items whose @neoworks.searchable fields contain needle, case-insensitively. */
 NW_API int nw_client_search(nw_client* client, const char* collection, const char* needle, nw_buffer* json);
+/* Ids of the items of collection that match query_json, a Prisma-style filter, as a JSON array:
+ *   {"where": {...}, "orderBy": {"field": "asc"} | [{"field": "desc"}, ...], "take": n}
+ * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
+ * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive"), AND, OR and NOT
+ * lists or objects, and "parent": an id, id operators, or {"is": {...container fields...}}.
+ * "model": "asset" queries the collection's assets, with the fields of its asset model, instead
+ * of its items.
+ * Timestamps compare as instants. It reads the in-memory index of field values and decrypts
+ * nothing. NW_ERR_INVALID_ARGUMENT: a field the schema does not define or an operator or value
+ * that does not fit the field's type, see nw_client_last_content_error for the location.
+ * NW_ERR_INVALID_STATE: no confirmed descriptor for the collection. NW_ERR_MALFORMED: not JSON. */
+NW_API int nw_client_query(nw_client* client, const char* collection, const char* query_json, nw_buffer* json);
 /* Wipes keys and all local data for this holder. */
 NW_API int nw_client_wipe(nw_client* client);
 
@@ -273,10 +290,17 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
  * Grants and revocations are queued and sent by the next sync. */
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
- *           "recipient": <identity json>}. Writes the signed AccessGrant JSON. */
+ *           "recipient": <identity json>}. Writes the signed AccessGrant JSON.
+ * Sharing with a user also grants that user read access to every node the shared content refers
+ * to (fields declared ref<Model>), recursively and through shortcuts, unless they already can open
+ * it; the facets limit which fields count. If this holder may not share one of those nodes, nothing
+ * is granted: NW_ERR_FORBIDDEN, and nw_client_last_content_error gives {"path": <that node's id>,
+ * "reason": "asset_not_shareable"}. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
 /* Removes a principal and rotates the node key and every descendant key so it cannot read
- * later writes. report_json: {"rotatedNodeIds": [...], "blobReencryptionRequired": [...]}. */
+ * later writes. A user also loses the grants they hold on nodes the content referred to, unless
+ * another node they can still open refers to the same node; those nodes rotate too and are
+ * listed in the report. report_json: {"rotatedNodeIds": [...], "blobReencryptionRequired": [...]}. */
 NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
                                    const char* principal_id, nw_buffer* report_json);
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);

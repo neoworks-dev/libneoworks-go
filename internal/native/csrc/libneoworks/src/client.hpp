@@ -3,6 +3,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "account.hpp"
 #include "database.hpp"
 #include "descriptor.hpp"
+#include "field_index.hpp"
 #include "http.hpp"
 #include "install.hpp"
 #include "keyring.hpp"
@@ -23,6 +25,7 @@ struct CreateNodeRequest {
   std::string kind;
   // A JSON object of the collection's model for `kind`. Roots carry no content.
   Json content = Json::object();
+  // An item created with a file is an asset; every other node is created without one.
   std::optional<BlobDescriptor> blob;
 };
 
@@ -39,9 +42,8 @@ struct UpdateNodeRequest {
   // The top-level fields to change. A given field replaces the stored value, null clears it,
   // and fields not given keep their value.
   Json changes = Json::object();
+  // Replaces an asset's file. InvalidArgument for a node that is not an asset.
   std::optional<BlobDescriptor> blob;
-  // Detaches the node's blob. Cannot be combined with `blob`.
-  bool removeBlob = false;
 };
 
 enum class PinState { New, Match, Changed };
@@ -131,7 +133,7 @@ class Client {
   Status completeDescriptorCheck(const std::string& collection, const HttpResponse& response);
   // The descriptor of `collection` once confirmed, nullptr before.
   const SchemaDescriptor* descriptorFor(const std::string& collection) const;
-  // Why the last create, update or read of content was rejected.
+  // Why the last create, update, read of content or query was rejected.
   const CodecError& lastContentError() const { return lastContentError_; }
 
   Result<std::string> createNode(const CreateNodeRequest& request);
@@ -154,6 +156,18 @@ class Client {
   // Role this principal holds on the node: own grants on the node or an ancestor, and
   // through shortcuts to it, capped by certificate scopes. Empty string when none.
   std::string effectiveRole(const std::string& nodeId) const;
+
+  // The ids of the items of `collection` matching `query`, a Prisma-style
+  // `{ where, orderBy, take }` (see query.hpp), read from the in-memory index of the values of
+  // every node this holder could open; nothing is decrypted. Only items are returned: containers
+  // are indexed so that `where.parent.is` can filter on their fields. Fields are those of the
+  // schema's item model. InvalidState: no confirmed descriptor for the collection.
+  // InvalidArgument: the query does not fit the schema, see lastContentError.
+  Result<std::vector<std::string>> query(const std::string& collection, const Json& query);
+#if defined(NW_ENABLE_TEST_HOOKS)
+  // How many times a node's content was decrypted for reading, by the index or by readNode.
+  size_t contentDecryptions() const { return contentDecryptions_; }
+#endif
 
   // Items whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in epoch
   // milliseconds.
@@ -234,6 +248,20 @@ class Client {
   };
 
   Client() = default;
+
+  // The in-memory index of readable field values. A node is read into it when it is stored or
+  // removed in the database, and again when keys, grants or descriptors that unlock it arrive.
+  void attachIndex();
+  void onNodeChanged(const std::string& nodeId);
+  void onGrantChanged(const std::string& nodeId);
+  void indexNode(const std::string& nodeId);
+  void indexPendingNodes();
+  void resetIndexOf(const std::string& collection);
+  void evictNodesOutOfView(const std::string& collection);
+  enum class OwnGrants { None, Revoked, Active };
+  OwnGrants ownGrantsOn(const std::string& nodeId) const;
+  bool holderLostView(const Node& node) const;
+  Result<IndexedNode> indexEntryFor(const Node& node);
   Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   // The node descriptor for content of `kind` in `collection`; records the reason on failure.
   Result<const NodeDescriptor*> nodeDescriptorFor(const std::string& collection, const std::string& kind);
@@ -263,6 +291,36 @@ class Client {
   Result<std::vector<RotationStep>> planRotation(const std::string& nodeId, const std::string& removedType,
                                                  const std::string& removedId);
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
+  // Writes and queues the grant described by `request`; the caller checked the right to share.
+  Result<AccessGrant> grantNode(const ShareRequest& request);
+  // Sharing follows references (client_references.cpp).
+  struct ReferenceWalk;
+  using FacetTags = std::optional<std::vector<uint32_t>>;
+  // The nodes outside the subtree of `startId` that its content refers to, directly or through
+  // other referenced nodes and shortcuts, in discovery order. `facets` limits the references of
+  // the starting subtree to fields in those facets. References to nodes that are not here or are
+  // deleted are left out.
+  std::vector<std::string> referencedNodesOf(const std::string& startId, const FacetTags& facets) const;
+  void walkSubtree(ReferenceWalk& walk, const std::string& rootId, const FacetTags& facets) const;
+  void walkNode(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
+  void walkReferences(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
+  void walkReference(ReferenceWalk& walk, const std::string& nodeId) const;
+  bool isWithin(const std::string& nodeId, const std::string& ancestorId) const;
+  // Refuses with the node as `lastContentError` path and "asset_not_shareable" when this holder
+  // cannot hand out one of the nodes.
+  Status requireShareable(const std::vector<std::string>& nodeIds);
+  bool principalHasAccess(const Node& node, const std::string& principalType, const std::string& principalId) const;
+  bool hasActiveGrant(const std::string& nodeId, const std::string& principalType,
+                      const std::string& principalId) const;
+  bool isReferencedForPrincipal(const std::string& nodeId, const std::string& principalType,
+                                const std::string& principalId) const;
+  Status grantReferenced(const std::string& nodeId, const ShareRequest& share);
+  // Gives the people a node is shared with read access to what it refers to, where this holder
+  // may share that. What it may not share is left out; the write itself never fails for it.
+  void grantReferencesToHolders(const std::string& nodeId);
+  std::vector<std::string> peopleWithAccessTo(const Node& node) const;
+  void revokeUnreferenced(const std::string& startId, const std::string& principalType,
+                          const std::string& principalId, RotationReport& report);
   Status parentForStep(const RotationStep& step,
                        const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
                        SymmetricKey& parentKey, uint32_t& parentEpoch);
@@ -293,6 +351,12 @@ class Client {
   int64_t lastOutboxStamp_ = 0;
   std::map<std::string, RegisteredDescriptor> descriptors_;
   CodecError lastContentError_;
+  FieldIndex index_;
+  // Nodes not in the index because they cannot be read yet.
+  std::set<std::string> unindexedNodeIds_;
+#if defined(NW_ENABLE_TEST_HOOKS)
+  size_t contentDecryptions_ = 0;
+#endif
 };
 
 }  // namespace nw

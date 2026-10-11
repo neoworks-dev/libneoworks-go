@@ -225,6 +225,49 @@ func (client *Client) ListNodes(parentID, collection string) ([]NodeSummary, err
 	return nodes, nil
 }
 
+// Query is a Prisma-style filter over the items or assets of one collection. Where holds
+// field filters (a bare value, or the operators equals, not, in, notIn, lt,
+// lte, gt, gte and for text contains, startsWith, endsWith with "mode":
+// "insensitive"), AND, OR and NOT, and "parent": a container id, operators on
+// it, or {"is": {...}} with filters on the container's fields. OrderBy lists
+// one field and direction ("asc" or "desc") per entry. Take limits the count.
+// Model is "item" (the default) or "asset": an asset query filters the
+// collection's assets by the fields of its asset model.
+type Query struct {
+	Model   string              `json:"model,omitempty"`
+	Where   map[string]any      `json:"where,omitempty"`
+	OrderBy []map[string]string `json:"orderBy,omitempty"`
+	Take    *int                `json:"take,omitempty"`
+}
+
+// Query returns the IDs of the items (or assets) in collection that match query, in
+// OrderBy order. It reads the in-memory index of field values and decrypts
+// nothing. A field the schema does not define, or an operator or value that
+// does not fit the field's type, is a *ContentError with StatusInvalidArgument;
+// StatusInvalidState means the collection's descriptor is not confirmed yet.
+func (client *Client) Query(collection string, query Query) ([]string, error) {
+	request, err := json.Marshal(query)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	collectionText := cString(collection)
+	defer freeString(collectionText)
+	requestText := cString(string(request))
+	defer freeString(requestText)
+	var buffer C.nw_buffer
+	client.mutex.Lock()
+	err = client.contentCall(C.nw_client_query(client.native, collectionText, requestText, &buffer))
+	client.mutex.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	if err := json.Unmarshal(takeBuffer(&buffer), &ids); err != nil {
+		return nil, fmt.Errorf("query result: %w", err)
+	}
+	return ids, nil
+}
+
 // Wipe deletes everything the local store holds; the install keeps its keys.
 func (client *Client) Wipe() error {
 	client.mutex.Lock()

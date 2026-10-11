@@ -55,6 +55,8 @@ Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::str
     check = DescriptorCheck{registered.descriptorHash, std::move(request)};
   }
   descriptors_[collection] = std::move(registered);
+  resetIndexOf(collection);
+  indexPendingNodes();
   return check;
 }
 
@@ -71,7 +73,9 @@ Status Client::completeDescriptorCheck(const std::string& collection, const Http
     return Status::IoFailure;
   }
   registered.confirmed = true;
-  return database_->acceptDescriptor(collection, registered.descriptorHash);
+  Status accepted = database_->acceptDescriptor(collection, registered.descriptorHash);
+  indexPendingNodes();
+  return accepted;
 }
 
 const SchemaDescriptor* Client::descriptorFor(const std::string& collection) const {
@@ -102,7 +106,8 @@ Result<FacetMap> Client::encodeNewContent(const CreateNodeRequest& request) {
   if (request.kind == "root") {
     return FacetMap();
   }
-  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(request.collection, request.kind);
+  Result<const NodeDescriptor*> descriptor =
+      nodeDescriptorFor(request.collection, contentKindFor(request.kind, request.blob.has_value()));
   if (!descriptor.ok()) {
     return descriptor.status();
   }
@@ -119,6 +124,10 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
   }
   if (isRoot && signer_.authorType != "user") {
     return Status::Forbidden;
+  }
+  if (request.blob.has_value() && request.kind != "item") {
+    lastContentError_ = contentError(Status::InvalidArgument, request.kind, "only an asset carries a file");
+    return Status::InvalidArgument;
   }
   Node node;
   node.id = newUuid();
@@ -147,12 +156,14 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
     return stored;
   }
   keyring_.addNodeKey(node.id, node.epoch, nodeKey.clone());
+  indexPendingNodes();
   if (isRoot) {
     Status granted = createOwnerGrant(node, nodeKey);
     if (granted != Status::Ok) {
       return granted;
     }
   }
+  grantReferencesToHolders(node.id);
   return node.id;
 }
 
@@ -189,6 +200,7 @@ Result<std::string> Client::createShortcut(const CreateShortcutRequest& request)
     return stored;
   }
   keyring_.addNodeKey(node.id, node.epoch, targetKey.value().clone());
+  grantReferencesToHolders(node.id);
   return node.id;
 }
 
@@ -198,7 +210,8 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (local == nullptr || local->node.deleted) {
     return Status::NotFound;
   }
-  if (request.removeBlob && request.blob.has_value()) {
+  if (request.blob.has_value() && !local->node.blob.has_value()) {
+    lastContentError_ = contentError(Status::InvalidArgument, request.nodeId, "only an asset carries a file");
     return Status::InvalidArgument;
   }
   if (!request.changes.is_object() || (!carriesContent(local->node) && !request.changes.empty())) {
@@ -217,7 +230,7 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   }
   FacetMap plaintexts = previous.value();
   if (carriesContent(local->node)) {
-    Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(local->node.collection, local->node.kind);
+    Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(local->node.collection, contentKindOf(local->node));
     if (!descriptor.ok()) {
       return descriptor.status();
     }
@@ -232,12 +245,13 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (request.blob.has_value()) {
     node.blob = request.blob;
   }
-  if (request.removeBlob) {
-    node.blob = std::nullopt;
-  }
   node.updatedAt = nowText();
   sealContent(node, nodeKey.value(), plaintexts);
-  return signAndStore(node);
+  Status stored = signAndStore(node);
+  if (stored == Status::Ok) {
+    grantReferencesToHolders(node.id);
+  }
+  return stored;
 }
 
 Status Client::deleteNode(const std::string& nodeId, bool recursive) {
@@ -298,7 +312,7 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (!carriesContent(node)) {
     return Json::object();
   }
-  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node.collection, node.kind);
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node.collection, contentKindOf(node));
   if (!descriptor.ok()) {
     return descriptor.status();
   }
@@ -319,6 +333,9 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (readable.value().empty() && nodeKey == nullptr) {
     return Status::NotFound;
   }
+#if defined(NW_ENABLE_TEST_HOOKS)
+  ++contentDecryptions_;
+#endif
   return decodeContent(*descriptor.value(), readable.value(), lastContentError_);
 }
 
