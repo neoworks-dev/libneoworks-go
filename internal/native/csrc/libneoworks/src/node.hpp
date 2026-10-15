@@ -78,12 +78,14 @@ Bytes nodeKeyWrapAad(std::string_view id, const std::optional<std::string>& pare
                      uint32_t parentEpoch);
 Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, uint32_t epoch, uint64_t baseSeq,
                bool deleted);
-Bytes blobChunkAad(std::string_view id, std::string_view objectId, uint32_t index, bool finalChunk);
+// Binds a chunk to its object, position and the final flag, not to a node, so a File value can
+// move to another record with its stored objects.
+Bytes blobChunkAad(std::string_view objectId, uint32_t index, bool finalChunk);
 
 SymmetricKey facetKey(const SymmetricKey& nodeKey, uint32_t tag);
-// The key of one stored file, derived from the node key and the file's object id, so it does not
-// change when other files of the node come and go.
-SymmetricKey fileKey(const SymmetricKey& nodeKey, std::string_view objectId);
+// The key of one stored object, the original or a variant of a file: BLAKE2b-256 keyed with the
+// file's random key over "nwfile02" followed by the object id as lowercase hyphenated text.
+SymmetricKey objectKey(const SymmetricKey& fileKey, std::string_view objectId);
 
 Bytes wrapNodeKey(const SymmetricKey& parentKey, const SymmetricKey& nodeKey, std::string_view id,
                   const std::optional<std::string>& parentId, uint32_t epoch, uint32_t parentEpoch);
@@ -103,10 +105,10 @@ void sealContent(Node& node, const SymmetricKey& nodeKey, const FacetMap& plaint
 Result<FacetMap> openContent(const Node& node, const SymmetricKey& nodeKey);
 
 size_t blobChunkCount(uint64_t size);
-Bytes encryptBlobChunk(const SymmetricKey& fileKeyValue, std::string_view nodeId, std::string_view objectId,
-                       uint32_t index, bool finalChunk, ByteView plaintext);
-Result<Bytes> decryptBlobChunk(const SymmetricKey& fileKeyValue, std::string_view nodeId,
-                               std::string_view objectId, uint32_t index, bool finalChunk, ByteView boxed);
+Bytes encryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                       bool finalChunk, ByteView plaintext);
+Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                               bool finalChunk, ByteView boxed);
 
 Bytes nodeWriteMessage(const Node& node);
 // Sets node.signature.

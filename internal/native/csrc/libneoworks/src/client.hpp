@@ -58,9 +58,6 @@ struct ShareRequest {
 
 struct RotationReport {
   std::vector<std::string> rotatedNodeIds;
-  // The chunks of a node's files stay encrypted under the previous epoch's key; the app must
-  // re-encrypt and re-upload them for the new key chain.
-  std::vector<std::string> fileReencryptionRequired;
 };
 
 struct LinkRecord {
@@ -149,6 +146,10 @@ class Client {
   // decrypt. A version whose author cannot be checked offline is unverified.
   Result<VersionRead> readVersion(const Json& version);
   Result<SymmetricKey> resolveNodeKey(const std::string& nodeId);
+  // The key of the file that has the object `objectId` among its original and variants, read from
+  // the File value in the fields of the node this client can open. NotFound: no such object in
+  // those fields.
+  Result<SymmetricKey> resolveFileKey(const std::string& nodeId, const std::string& objectId);
   NodeLookup nodeLookup() const;
 
   // Role this principal holds on the node: own grants on the node or an ancestor, and
@@ -263,9 +264,15 @@ class Client {
   Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   // The node descriptor for content of `kind` in `collection`; records the reason on failure.
   Result<const NodeDescriptor*> nodeDescriptorFor(const std::string& collection, const std::string& kind);
+  // The content as an app sees it: Files without their keys.
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
+  // The content as stored, Files with their keys.
+  Result<Json> readStoredContent(const Node& node, const SymmetricKey* nodeKey);
   // The facet plaintexts of a node to create; roots have none.
   Result<FacetMap> encodeNewContent(const CreateNodeRequest& request);
+  // `changes` with a key in every File value: the stored one when `stored` holds the File, else a
+  // new one.
+  Result<Json> withFileKeys(const NodeDescriptor& descriptor, const Json& changes, const FacetMap& stored);
   // The plain file list for facets about to be sealed into a node of `kind`; empty for nodes
   // without content.
   Result<std::vector<NodeFile>> filesOfContent(const std::string& collection, const std::string& kind,

@@ -1,6 +1,7 @@
 #include "files.hpp"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 #include "content_walk.hpp"
@@ -62,7 +63,107 @@ bool isSubsetOf(const std::vector<NodeFile>& seen, const std::vector<NodeFile>& 
   });
 }
 
+std::vector<const Json*> fileValuesOf(const ModelDescriptor& model, const Json& content) {
+  std::vector<const Json*> values;
+  walkContentLeaves(model, content, [&](const ValueShape& shape, const Json& value, uint32_t) {
+    if (shape.kind == ValueKind::File && value.is_object()) {
+      values.push_back(&value);
+    }
+  });
+  return values;
+}
+
+bool holdsObject(const Json& file, std::string_view objectId) {
+  auto original = file.find("objectId");
+  if (original != file.end() && original->is_string() && original->get_ref<const std::string&>() == objectId) {
+    return true;
+  }
+  auto variants = file.find("variants");
+  if (variants == file.end() || !variants->is_object()) {
+    return false;
+  }
+  return std::any_of(variants->begin(), variants->end(), [&](const Json& variant) {
+    auto variantId = variant.find("objectId");
+    return variantId != variant.end() && variantId->is_string() &&
+           variantId->get_ref<const std::string&>() == objectId;
+  });
+}
+
+Result<SymmetricKey> keyOfFile(const Json& file) {
+  auto key = file.find("key");
+  if (key == file.end() || !key->is_string()) {
+    return Status::Malformed;
+  }
+  std::optional<Bytes> decoded = fromBase64Url(key->get_ref<const std::string&>());
+  if (!decoded.has_value()) {
+    return Status::Malformed;
+  }
+  return SymmetricKey::fromBytes(*decoded);
+}
+
+// The key text of every stored File by the object id of its original.
+std::map<std::string, std::string> keyTextsByObjectId(const ModelDescriptor& model, const Json& stored) {
+  std::map<std::string, std::string> keyTexts;
+  for (const Json* file : fileValuesOf(model, stored)) {
+    auto objectId = file->find("objectId");
+    auto key = file->find("key");
+    if (objectId != file->end() && objectId->is_string() && key != file->end() && key->is_string()) {
+      keyTexts.emplace(objectId->get_ref<const std::string&>(), key->get_ref<const std::string&>());
+    }
+  }
+  return keyTexts;
+}
+
+Status assignFileKey(Json& file, const std::map<std::string, std::string>& storedKeyTexts, CodecError& error) {
+  if (file.contains("key")) {
+    error.status = Status::InvalidArgument;
+    error.path = fileModel().name + ".key";
+    error.reason = "is set by the core";
+    return Status::InvalidArgument;
+  }
+  auto objectId = file.find("objectId");
+  if (objectId != file.end() && objectId->is_string()) {
+    auto stored = storedKeyTexts.find(objectId->get_ref<const std::string&>());
+    if (stored != storedKeyTexts.end()) {
+      file["key"] = stored->second;
+      return Status::Ok;
+    }
+  }
+  file["key"] = toBase64Url(SymmetricKey::random().view());
+  return Status::Ok;
+}
+
 }  // namespace
+
+Result<SymmetricKey> findFileKey(const ModelDescriptor& model, const Json& content, std::string_view objectId) {
+  for (const Json* file : fileValuesOf(model, content)) {
+    if (holdsObject(*file, objectId)) {
+      return keyOfFile(*file);
+    }
+  }
+  return Status::NotFound;
+}
+
+bool holdsFile(const ModelDescriptor& model, const Json& content) { return !fileValuesOf(model, content).empty(); }
+
+Status assignFileKeys(const ModelDescriptor& model, Json& written, const Json& stored, CodecError& error) {
+  std::map<std::string, std::string> storedKeyTexts = keyTextsByObjectId(model, stored);
+  Status status = Status::Ok;
+  walkContentLeaves(model, written, [&](const ValueShape& shape, Json& value, uint32_t) {
+    if (shape.kind == ValueKind::File && value.is_object() && status == Status::Ok) {
+      status = assignFileKey(value, storedKeyTexts, error);
+    }
+  });
+  return status;
+}
+
+void removeFileKeys(const ModelDescriptor& model, Json& content) {
+  walkContentLeaves(model, content, [](const ValueShape& shape, Json& value, uint32_t) {
+    if (shape.kind == ValueKind::File && value.is_object()) {
+      value.erase("key");
+    }
+  });
+}
 
 Result<std::vector<NodeFile>> collectFiles(const ModelDescriptor& model, const Json& content) {
   std::vector<NodeFile> files;

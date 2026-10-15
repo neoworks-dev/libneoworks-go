@@ -151,7 +151,8 @@ struct SchemaDescriptor {
 };
 
 // The message a File value is: {objectId: uuid, name: string, mediaType: string, size: u64,
-// variants: {string: FileVariant}} with the ordinals 1 to 5, and FileVariant {objectId, size}.
+// variants: {string: FileVariant}, key: 32 bytes} with the ordinals 1 to 6, and FileVariant
+// {objectId, size}. The key encrypts the file's objects and never leaves the core.
 const ModelDescriptor& fileModel();
 
 constexpr uint32_t kDescriptorVersion = 1;

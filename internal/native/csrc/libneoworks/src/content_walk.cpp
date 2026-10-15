@@ -8,14 +8,16 @@ namespace {
 
 constexpr size_t kMaxNesting = 32;
 
-void walkValue(const ValueShape& shape, const Json& value, uint32_t fieldOrdinal, size_t depth,
-               const LeafVisitor& visit);
+// `Content` is `const Json` or `Json`, and `Visitor` the matching visitor type.
+template <typename Content, typename Visitor>
+void walkValue(const ValueShape& shape, Content& value, uint32_t fieldOrdinal, size_t depth, const Visitor& visit);
 
-void walkModel(const ModelDescriptor& model, const Json& content, uint32_t topLevelOrdinal, size_t depth,
-               const LeafVisitor& visit);
+template <typename Content, typename Visitor>
+void walkModel(const ModelDescriptor& model, Content& content, uint32_t topLevelOrdinal, size_t depth,
+               const Visitor& visit);
 
-void walkOneof(const ValueShape& shape, const Json& value, uint32_t fieldOrdinal, size_t depth,
-               const LeafVisitor& visit) {
+template <typename Content, typename Visitor>
+void walkOneof(const ValueShape& shape, Content& value, uint32_t fieldOrdinal, size_t depth, const Visitor& visit) {
   if (!value.is_object()) {
     return;
   }
@@ -27,8 +29,8 @@ void walkOneof(const ValueShape& shape, const Json& value, uint32_t fieldOrdinal
   }
 }
 
-void walkValue(const ValueShape& shape, const Json& value, uint32_t fieldOrdinal, size_t depth,
-               const LeafVisitor& visit) {
+template <typename Content, typename Visitor>
+void walkValue(const ValueShape& shape, Content& value, uint32_t fieldOrdinal, size_t depth, const Visitor& visit) {
   if (depth > kMaxNesting) {
     return;
   }
@@ -43,26 +45,23 @@ void walkValue(const ValueShape& shape, const Json& value, uint32_t fieldOrdinal
   visit(shape, value, fieldOrdinal);
 }
 
-void walkField(const FieldDescriptor& field, const Json& value, uint32_t topLevelOrdinal, size_t depth,
-               const LeafVisitor& visit) {
+template <typename Content, typename Visitor>
+void walkField(const FieldDescriptor& field, Content& value, uint32_t topLevelOrdinal, size_t depth,
+               const Visitor& visit) {
   bool isMap = field.container.kind == ContainerKind::Map || field.container.kind == ContainerKind::WrapperMap;
-  if (isMap && value.is_object()) {
-    for (const auto& [key, entry] : value.items()) {
-      walkValue(field.value, entry, topLevelOrdinal, depth, visit);
-    }
+  bool isCollection = (isMap && value.is_object()) || value.is_array();
+  if (!isCollection) {
+    walkValue(field.value, value, topLevelOrdinal, depth, visit);
     return;
   }
-  if (value.is_array()) {
-    for (const Json& element : value) {
-      walkValue(field.value, element, topLevelOrdinal, depth, visit);
-    }
-    return;
+  for (auto entry = value.begin(); entry != value.end(); ++entry) {
+    walkValue(field.value, entry.value(), topLevelOrdinal, depth, visit);
   }
-  walkValue(field.value, value, topLevelOrdinal, depth, visit);
 }
 
-void walkModel(const ModelDescriptor& model, const Json& content, uint32_t topLevelOrdinal, size_t depth,
-               const LeafVisitor& visit) {
+template <typename Content, typename Visitor>
+void walkModel(const ModelDescriptor& model, Content& content, uint32_t topLevelOrdinal, size_t depth,
+               const Visitor& visit) {
   if (!content.is_object() || depth > kMaxNesting) {
     return;
   }
@@ -82,6 +81,10 @@ void walkModel(const ModelDescriptor& model, const Json& content, uint32_t topLe
 }  // namespace
 
 void walkContentLeaves(const ModelDescriptor& model, const Json& content, const LeafVisitor& visit) {
+  walkModel(model, content, 0, 0, visit);
+}
+
+void walkContentLeaves(const ModelDescriptor& model, Json& content, const MutableLeafVisitor& visit) {
   walkModel(model, content, 0, 0, visit);
 }
 

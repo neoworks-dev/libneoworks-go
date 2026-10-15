@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 
+#include "crypto.hpp"
 #include "json.hpp"
 #include "schema_values.hpp"
 #include "wire.hpp"
@@ -48,6 +49,13 @@ const ModelDescriptor& fileVariantModel() {
     return variant;
   }();
   return model;
+}
+
+FieldDescriptor builtInFileKeyField() {
+  FieldDescriptor field = builtInField(6, "key", Scalar::Binary);
+  field.constraints.minLength = kKeyBytes;
+  field.constraints.maxLength = kKeyBytes;
+  return field;
 }
 
 FieldDescriptor builtInVariantsField() {
@@ -747,6 +755,7 @@ const ModelDescriptor& fileModel() {
     file.fields.push_back(builtInField(3, "mediaType", Scalar::String));
     file.fields.push_back(builtInField(4, "size", Scalar::U64));
     file.fields.push_back(builtInVariantsField());
+    file.fields.push_back(builtInFileKeyField());
     return file;
   }();
   return model;

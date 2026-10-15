@@ -226,7 +226,9 @@ NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
  * content is a JSON object of the schema's model for the kind (contract amendment 7 JSON mapping);
  * roots take none. A File value in it, {"objectId", "name", "mediaType", "size", "variants"}, names
  * the storage objects of the file and its variants; the core lists them on the node, with their
- * chunk counts, and the host uploads them with nw_blob_upload_begin. Writes the new node id.
+ * chunk counts, gives each new file a random key that it keeps inside the encrypted content, and
+ * the host uploads the objects with nw_blob_upload_begin. A File value never carries a key to or
+ * from the host; one that does is refused. Writes the new node id.
  * NW_ERR_INVALID_ARGUMENT: the content does not fit the schema, or an object id is used by more
  * than one file of the node, see nw_client_last_content_error. If the node is shared, the people
  * it is shared with also get read access to the nodes its content refers to, where the creator may
@@ -238,6 +240,7 @@ NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw
 NW_API int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id);
 /* request: {"nodeId": id, "changes": {...}}. A field in changes replaces the stored value, null
  * clears it, and fields not given keep their value. The node's file list follows its File values.
+ * A File value with an object id the node holds keeps that file's key; any other gets a new one.
  * A reference added to a shared node is granted to the people it is shared with, as on creation. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 NW_API int nw_client_delete_node(nw_client* client, const char* node_id, int recursive);
@@ -300,7 +303,8 @@ NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_
 /* Removes a principal and rotates the node key and every descendant key so it cannot read
  * later writes. A user also loses the grants they hold on nodes the content referred to, unless
  * another node they can still open refers to the same node; those nodes rotate too and are
- * listed in the report. report_json: {"rotatedNodeIds": [...], "fileReencryptionRequired": [...]}. */
+ * listed in the report. report_json: {"rotatedNodeIds": [...]}. Files are not touched: their keys
+ * live in the content, which is encrypted again with the new node key. */
 NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
                                    const char* principal_id, nw_buffer* report_json);
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);
@@ -340,7 +344,9 @@ NW_API void nw_sync_free(nw_sync* sync);
 
 /* Sans-IO transfer of one file of a node, in 4 MiB chunks, through presigned URLs. object_id is the
  * "objectId" of a File value or of one of its variants; the node's file list must hold it, and its
- * size and chunk count come from there (NW_ERR_NOT_FOUND otherwise).
+ * size and chunk count come from there. The key comes from the File value in the fields this client
+ * can open. NW_ERR_NOT_FOUND: the node does not list the object, or the field holding it cannot be
+ * opened.
  * Upload: the host feeds plaintext chunks on request. Download: it receives plaintext. */
 NW_API int nw_blob_upload_begin(nw_client* client, const char* node_id, const char* object_id,
                                 nw_blob_transfer** out);

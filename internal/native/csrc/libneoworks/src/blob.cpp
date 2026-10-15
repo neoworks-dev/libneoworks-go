@@ -44,15 +44,15 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
   if (file == nullptr) {
     return Status::NotFound;
   }
-  Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  Result<SymmetricKey> fileKey = client.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Upload;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
   transfer->totalSize_ = file->size;
   transfer->chunkCount_ = file->chunks;
   return transfer;
@@ -68,20 +68,15 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginDownload(Client& client
   if (file == nullptr) {
     return Status::NotFound;
   }
-  Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  Result<SymmetricKey> fileKey = client.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Download;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
-  for (auto& [epoch, key] : client.keyring().allNodeKeys(nodeId)) {
-    if (epoch != node->epoch) {
-      transfer->candidateKeys_.push_back(fileKey(key, objectId));
-    }
-  }
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
   transfer->chunkCount_ = file->chunks;
   return transfer;
 }
@@ -100,16 +95,16 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginLinkDownload(LinkReader
   if (file == nullptr) {
     return Status::NotFound;
   }
-  Result<SymmetricKey> nodeKey = reader.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  Result<SymmetricKey> fileKey = reader.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Download;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
   transfer->presignPath_ = "/api/v1/links/" + linkId + "/presign";
-  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
   transfer->chunkCount_ = file->chunks;
   return transfer;
 }
@@ -189,7 +184,7 @@ Status BlobTransfer::provideChunk(ByteView plaintext) {
   request_.url = urlFor(chunkIndex_);
   request_.isApi = false;
   request_.contentType = "application/octet-stream";
-  request_.body = encryptBlobChunk(candidateKeys_[0], nodeId_, objectId_, chunkIndex_, finalChunk, plaintext);
+  request_.body = encryptBlobChunk(objectKey_, objectId_, chunkIndex_, finalChunk, plaintext);
   awaiting_ = Awaiting::ChunkTransfer;
   state_ = State::RequestReady;
   return Status::Ok;
@@ -226,16 +221,14 @@ Status BlobTransfer::handleChunkDownload(const HttpResponse& response) {
     return fail(Status::IoFailure);
   }
   bool finalChunk = isFinalChunk(chunkIndex_);
-  for (const SymmetricKey& key : candidateKeys_) {
-    Result<Bytes> plaintext = decryptBlobChunk(key, nodeId_, objectId_, chunkIndex_, finalChunk, response.body);
-    if (plaintext.ok()) {
-      pendingPlaintext_ = plaintext.take();
-      awaiting_ = Awaiting::Nothing;
-      state_ = State::ChunkReady;
-      return Status::Ok;
-    }
+  Result<Bytes> plaintext = decryptBlobChunk(objectKey_, objectId_, chunkIndex_, finalChunk, response.body);
+  if (!plaintext.ok()) {
+    return fail(Status::AuthenticationFailed);
   }
-  return fail(Status::AuthenticationFailed);
+  pendingPlaintext_ = plaintext.take();
+  awaiting_ = Awaiting::Nothing;
+  state_ = State::ChunkReady;
+  return Status::Ok;
 }
 
 Status BlobTransfer::handleResponse(const HttpResponse& response) {

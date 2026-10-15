@@ -111,7 +111,27 @@ Result<FacetMap> Client::encodeNewContent(const CreateNodeRequest& request) {
   if (!descriptor.ok()) {
     return descriptor.status();
   }
-  return encodeContent(*descriptor.value(), request.content, FacetMap(), false, lastContentError_);
+  Result<Json> keyed = withFileKeys(*descriptor.value(), request.content, FacetMap());
+  if (!keyed.ok()) {
+    return keyed.status();
+  }
+  return encodeContent(*descriptor.value(), keyed.value(), FacetMap(), false, lastContentError_);
+}
+
+Result<Json> Client::withFileKeys(const NodeDescriptor& descriptor, const Json& changes, const FacetMap& stored) {
+  if (!holdsFile(*descriptor.model, changes)) {
+    return changes;
+  }
+  Result<Json> storedContent = decodeContent(descriptor, stored, lastContentError_);
+  if (!storedContent.ok()) {
+    return storedContent.status();
+  }
+  Json keyed = changes;
+  Status assigned = assignFileKeys(*descriptor.model, keyed, storedContent.value(), lastContentError_);
+  if (assigned != Status::Ok) {
+    return assigned;
+  }
+  return keyed;
 }
 
 Result<std::vector<NodeFile>> Client::filesOfContent(const std::string& collection, const std::string& kind,
@@ -242,7 +262,11 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
     if (!descriptor.ok()) {
       return descriptor.status();
     }
-    Result<FacetMap> encoded = encodeContent(*descriptor.value(), request.changes, previous.value(), true, lastContentError_);
+    Result<Json> keyed = withFileKeys(*descriptor.value(), request.changes, previous.value());
+    if (!keyed.ok()) {
+      return keyed.status();
+    }
+    Result<FacetMap> encoded = encodeContent(*descriptor.value(), keyed.value(), previous.value(), true, lastContentError_);
     if (!encoded.ok()) {
       return encoded.status();
     }
@@ -320,6 +344,35 @@ Status Client::rebaseLocalNode(const std::string& nodeId, const Node& remote) {
 // ── Reads ─────────────────────────────────────────────────────────────────────
 
 Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) {
+  Result<Json> content = readStoredContent(node, nodeKey);
+  if (!content.ok() || !carriesContent(node)) {
+    return content;
+  }
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node.collection, node.kind);
+  if (!descriptor.ok()) {
+    return descriptor.status();
+  }
+  removeFileKeys(*descriptor.value()->model, content.value());
+  return content;
+}
+
+Result<SymmetricKey> Client::resolveFileKey(const std::string& nodeId, const std::string& objectId) {
+  const Node* node = database_->findNode(nodeId);
+  if (node == nullptr || !carriesContent(*node)) {
+    return Status::NotFound;
+  }
+  Result<Json> content = readStoredContent(*node, nullptr);
+  if (!content.ok()) {
+    return content.status();
+  }
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node->collection, node->kind);
+  if (!descriptor.ok()) {
+    return descriptor.status();
+  }
+  return findFileKey(*descriptor.value()->model, content.value(), objectId);
+}
+
+Result<Json> Client::readStoredContent(const Node& node, const SymmetricKey* nodeKey) {
   lastContentError_ = CodecError{};
   if (!carriesContent(node)) {
     return Json::object();

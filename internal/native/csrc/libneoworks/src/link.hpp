@@ -26,9 +26,15 @@ class LinkReader {
   // The fields of the facets the link opens, as Client::readNode.
   Result<Json> readNode(const std::string& nodeId);
   Result<SymmetricKey> resolveNodeKey(const std::string& nodeId);
+  // The key of the file that has the object `objectId`, read from the File values of the fields
+  // the link opens, as Client::resolveFileKey.
+  Result<SymmetricKey> resolveFileKey(const std::string& nodeId, const std::string& objectId);
 
  private:
   LinkReader() = default;
+  const NodeDescriptor* descriptorOf(const Node& node) const;
+  // The fields of the facets the link opens, Files with their keys.
+  Result<Json> readStoredContent(const Node& node, const NodeDescriptor& descriptor);
 
   std::map<std::string, Node> nodes_;
   std::map<std::string, std::shared_ptr<const SchemaDescriptor>> descriptors_;

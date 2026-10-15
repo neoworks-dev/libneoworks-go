@@ -130,7 +130,6 @@ Json nodeSummary(Client& client, const LocalNode& local) {
 Json rotationReportJson(const RotationReport& report) {
   Json json = Json::object();
   json["rotatedNodeIds"] = report.rotatedNodeIds;
-  json["fileReencryptionRequired"] = report.fileReencryptionRequired;
   return json;
 }
 

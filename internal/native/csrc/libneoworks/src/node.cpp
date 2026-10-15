@@ -11,7 +11,7 @@ namespace nw {
 namespace {
 
 constexpr std::string_view kFacetContext = "nwfacet1";
-constexpr std::string_view kFileKeyContext = "nwfile01";
+constexpr std::string_view kObjectKeyContext = "nwfile02";
 constexpr std::string_view kKinds[] = {"root", "container", "item"};
 constexpr std::string_view kPrincipalTypes[] = {"user", "install"};
 constexpr std::string_view kTargetRoles[] = {"read", "write"};
@@ -313,17 +313,17 @@ Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, u
       .finish();
 }
 
-Bytes blobChunkAad(std::string_view id, std::string_view objectId, uint32_t index, bool finalChunk) {
-  return TlvWriter("nw-blob-chunk-v1").text(id).text(objectId).u32(index).flag(finalChunk).finish();
+Bytes blobChunkAad(std::string_view objectId, uint32_t index, bool finalChunk) {
+  return TlvWriter("nw-blob-chunk-v2").text(objectId).u32(index).flag(finalChunk).finish();
 }
 
 SymmetricKey facetKey(const SymmetricKey& nodeKey, uint32_t tag) { return kdf(nodeKey, tag, kFacetContext); }
 
-SymmetricKey fileKey(const SymmetricKey& nodeKey, std::string_view objectId) {
-  Bytes input = bytesOf(kFileKeyContext);
+SymmetricKey objectKey(const SymmetricKey& fileKey, std::string_view objectId) {
+  Bytes input = bytesOf(kObjectKeyContext);
   Bytes id = bytesOf(objectId);
   input.insert(input.end(), id.begin(), id.end());
-  return keyedHash(nodeKey, input);
+  return keyedHash(fileKey, input);
 }
 
 Bytes wrapNodeKey(const SymmetricKey& parentKey, const SymmetricKey& nodeKey, std::string_view id,
@@ -392,14 +392,14 @@ size_t blobChunkCount(uint64_t size) {
   return static_cast<size_t>((size + kBlobChunkBytes - 1) / kBlobChunkBytes);
 }
 
-Bytes encryptBlobChunk(const SymmetricKey& fileKeyValue, std::string_view nodeId, std::string_view objectId,
-                       uint32_t index, bool finalChunk, ByteView plaintext) {
-  return aeadEncrypt(fileKeyValue, plaintext, blobChunkAad(nodeId, objectId, index, finalChunk));
+Bytes encryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                       bool finalChunk, ByteView plaintext) {
+  return aeadEncrypt(objectKeyValue, plaintext, blobChunkAad(objectId, index, finalChunk));
 }
 
-Result<Bytes> decryptBlobChunk(const SymmetricKey& fileKeyValue, std::string_view nodeId,
-                               std::string_view objectId, uint32_t index, bool finalChunk, ByteView boxed) {
-  return aeadDecrypt(fileKeyValue, boxed, blobChunkAad(nodeId, objectId, index, finalChunk));
+Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                               bool finalChunk, ByteView boxed) {
+  return aeadDecrypt(objectKeyValue, boxed, blobChunkAad(objectId, index, finalChunk));
 }
 
 Bytes nodeWriteMessage(const Node& node) {

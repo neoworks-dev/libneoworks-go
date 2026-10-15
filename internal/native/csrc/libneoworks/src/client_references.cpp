@@ -260,9 +260,6 @@ void Client::revokeUnreferenced(const std::string& startId, const std::string& p
     for (const std::string& rotatedId : revoked.value().rotatedNodeIds) {
       report.rotatedNodeIds.push_back(rotatedId);
     }
-    for (const std::string& stale : revoked.value().fileReencryptionRequired) {
-      report.fileReencryptionRequired.push_back(stale);
-    }
   }
 }
 
