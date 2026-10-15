@@ -17,11 +17,19 @@ HttpRequest apiJsonRequest(const std::string& url, const Bytes& body) {
 
 bool isSuccess(int httpStatus) { return httpStatus >= 200 && httpStatus < 300; }
 
+const NodeFile* findListedFile(const Node& node, const std::string& objectId) {
+  for (const NodeFile& file : node.files) {
+    if (file.objectId == objectId) {
+      return &file;
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, const std::string& nodeId,
-                                                                uint32_t variantIndex, const std::string& objectId,
-                                                                uint64_t totalSize) {
+                                                                const std::string& objectId) {
   if (!isLowercaseUuid(objectId)) {
     return Status::InvalidArgument;
   }
@@ -32,6 +40,10 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
   if (node == nullptr || isShortcut(*node)) {
     return Status::InvalidArgument;
   }
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
+  }
   Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
   if (!nodeKey.ok()) {
     return nodeKey.status();
@@ -40,18 +52,21 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
   transfer->mode_ = Mode::Upload;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
-  transfer->totalSize_ = totalSize;
-  transfer->chunkCount_ = static_cast<uint32_t>(blobChunkCount(totalSize));
+  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
+  transfer->totalSize_ = file->size;
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginDownload(Client& client, const std::string& nodeId,
-                                                                  uint32_t variantIndex, const std::string& objectId,
-                                                                  uint32_t chunkCount) {
+                                                                  const std::string& objectId) {
   const Node* node = client.database().findNode(nodeId);
-  if (node == nullptr || isShortcut(*node) || !isLowercaseUuid(objectId) || chunkCount == 0) {
+  if (node == nullptr || isShortcut(*node) || !isLowercaseUuid(objectId)) {
     return Status::InvalidArgument;
+  }
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
   }
   Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
   if (!nodeKey.ok()) {
@@ -61,22 +76,29 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginDownload(Client& client
   transfer->mode_ = Mode::Download;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
+  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
   for (auto& [epoch, key] : client.keyring().allNodeKeys(nodeId)) {
     if (epoch != node->epoch) {
-      transfer->candidateKeys_.push_back(blobKey(key, variantIndex));
+      transfer->candidateKeys_.push_back(fileKey(key, objectId));
     }
   }
-  transfer->chunkCount_ = chunkCount;
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginLinkDownload(LinkReader& reader, const std::string& linkId,
-                                                                      const std::string& nodeId, uint32_t variantIndex,
-                                                                      const std::string& objectId,
-                                                                      uint32_t chunkCount) {
-  if (!isLowercaseUuid(objectId) || !isLowercaseUuid(linkId) || chunkCount == 0) {
+                                                                      const std::string& nodeId,
+                                                                      const std::string& objectId) {
+  if (!isLowercaseUuid(objectId) || !isLowercaseUuid(linkId)) {
     return Status::InvalidArgument;
+  }
+  const Node* node = reader.findNode(nodeId);
+  if (node == nullptr) {
+    return Status::NotFound;
+  }
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
   }
   Result<SymmetricKey> nodeKey = reader.resolveNodeKey(nodeId);
   if (!nodeKey.ok()) {
@@ -87,8 +109,8 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginLinkDownload(LinkReader
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
   transfer->presignPath_ = "/api/v1/links/" + linkId + "/presign";
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
-  transfer->chunkCount_ = chunkCount;
+  transfer->candidateKeys_.push_back(fileKey(nodeKey.value(), objectId));
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 

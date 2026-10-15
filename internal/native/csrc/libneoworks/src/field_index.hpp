@@ -44,8 +44,6 @@ struct IndexedNode {
   std::vector<std::string> searchTexts;
   // The nodes its content refers to.
   std::vector<IndexedReference> references;
-  // The descriptor node kind of its content: "container", "item" or "asset"; empty for roots.
-  std::string model;
 };
 
 // The filterable values of every node this holder can read, per collection. Only values live

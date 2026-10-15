@@ -317,7 +317,7 @@ Result<RotationReport> Client::rotateSubtree(const std::string& nodeId, const st
     }
     rotated.emplace(step.nodeId, std::make_pair(step.newKey.clone(), step.newEpoch));
     report.rotatedNodeIds.push_back(step.nodeId);
-    if (step.node.blob.has_value()) {
+    if (!step.node.files.empty()) {
       report.blobReencryptionRequired.push_back(step.nodeId);
     }
   }

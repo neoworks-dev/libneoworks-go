@@ -23,10 +23,10 @@ struct CreateNodeRequest {
   std::optional<std::string> parentId;
   std::string collection;
   std::string kind;
-  // A JSON object of the collection's model for `kind`. Roots carry no content.
+  // A JSON object of the collection's model for `kind`. Roots carry no content. The `File` values
+  // in it name the storage objects the app uploads once the node is pushed; the core lists them
+  // on the node.
   Json content = Json::object();
-  // An item created with a file is an asset; every other node is created without one.
-  std::optional<BlobDescriptor> blob;
 };
 
 // An item under `parentId` that opens `targetId`, an item of the same collection, for
@@ -42,8 +42,6 @@ struct UpdateNodeRequest {
   // The top-level fields to change. A given field replaces the stored value, null clears it,
   // and fields not given keep their value.
   Json changes = Json::object();
-  // Replaces an asset's file. InvalidArgument for a node that is not an asset.
-  std::optional<BlobDescriptor> blob;
 };
 
 enum class PinState { New, Match, Changed };
@@ -60,7 +58,7 @@ struct ShareRequest {
 
 struct RotationReport {
   std::vector<std::string> rotatedNodeIds;
-  // Blob chunks stay encrypted under the previous epoch's key; the app must
+  // The chunks of a node's files stay encrypted under the previous epoch's key; the app must
   // re-encrypt and re-upload them for the new key chain.
   std::vector<std::string> blobReencryptionRequired;
 };
@@ -268,6 +266,10 @@ class Client {
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
   // The facet plaintexts of a node to create; roots have none.
   Result<FacetMap> encodeNewContent(const CreateNodeRequest& request);
+  // The plain file list for facets about to be sealed into a node of `kind`; empty for nodes
+  // without content.
+  Result<std::vector<NodeFile>> filesOfContent(const std::string& collection, const std::string& kind,
+                                               const FacetMap& plaintexts);
   Status signAndStore(Node& node);
   Status createOwnerGrant(const Node& root, const SymmetricKey& nodeKey);
   Status queueGrant(const AccessGrant& grant);

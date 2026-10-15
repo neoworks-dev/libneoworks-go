@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "files.hpp"
 #include "node_content.hpp"
 #include "tlv.hpp"
 
@@ -135,7 +136,7 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
   auto schema = descriptors_.find(node->collection);
   const NodeDescriptor* descriptor = nullptr;
   if (schema != descriptors_.end()) {
-    descriptor = schema->second->nodeByKind(contentKindOf(*node));
+    descriptor = schema->second->nodeByKind(node->kind);
   }
   if (descriptor == nullptr) {
     return Status::InvalidState;
@@ -150,7 +151,14 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
     return Status::NotFound;
   }
   CodecError error;
-  return decodeContent(*descriptor, readable.value(), error);
+  Result<Json> content = decodeContent(*descriptor, readable.value(), error);
+  if (!content.ok()) {
+    return content.status();
+  }
+  if (checkNodeFiles(*descriptor, *node, readable.value(), content.value()) != Status::Ok) {
+    return Status::IntegrityFailure;
+  }
+  return content;
 }
 
 }  // namespace nw

@@ -46,19 +46,29 @@ type NodeUpdate struct {
 	Changes map[string]any `json:"changes"`
 }
 
+// NodeFile is one stored file of a node as the server sees it: the object and
+// what it takes, without a name. A node lists the original and every variant of
+// each File in its content.
+type NodeFile struct {
+	ObjectID string `json:"objectId"`
+	Chunks   uint32 `json:"chunks"`
+	Size     uint64 `json:"size"`
+}
+
 // NodeSummary is a node as the local store lists it, without its content.
 type NodeSummary struct {
-	ID         string   `json:"id"`
-	ParentID   *string  `json:"parentId"`
-	OwnerID    string   `json:"ownerId"`
-	Collection string   `json:"collection"`
-	Kind       NodeKind `json:"kind"`
-	Deleted    bool     `json:"deleted"`
-	Dirty      bool     `json:"dirty"`
-	Rejected   bool     `json:"rejected"`
-	Role       string   `json:"role"`
-	CreatedAt  string   `json:"createdAt"`
-	UpdatedAt  string   `json:"updatedAt"`
+	ID         string     `json:"id"`
+	ParentID   *string    `json:"parentId"`
+	OwnerID    string     `json:"ownerId"`
+	Collection string     `json:"collection"`
+	Kind       NodeKind   `json:"kind"`
+	Deleted    bool       `json:"deleted"`
+	Dirty      bool       `json:"dirty"`
+	Rejected   bool       `json:"rejected"`
+	Role       string     `json:"role"`
+	CreatedAt  string     `json:"createdAt"`
+	UpdatedAt  string     `json:"updatedAt"`
+	Files      []NodeFile `json:"files"`
 }
 
 // ContentError says why content did not fit the collection's schema.
@@ -225,22 +235,20 @@ func (client *Client) ListNodes(parentID, collection string) ([]NodeSummary, err
 	return nodes, nil
 }
 
-// Query is a Prisma-style filter over the items or assets of one collection. Where holds
+// Query is a Prisma-style filter over the items of one collection. Where holds
 // field filters (a bare value, or the operators equals, not, in, notIn, lt,
 // lte, gt, gte and for text contains, startsWith, endsWith with "mode":
 // "insensitive"), AND, OR and NOT, and "parent": a container id, operators on
 // it, or {"is": {...}} with filters on the container's fields. OrderBy lists
 // one field and direction ("asc" or "desc") per entry. Take limits the count.
-// Model is "item" (the default) or "asset": an asset query filters the
-// collection's assets by the fields of its asset model.
+// File fields cannot be filtered or ordered on.
 type Query struct {
-	Model   string              `json:"model,omitempty"`
 	Where   map[string]any      `json:"where,omitempty"`
 	OrderBy []map[string]string `json:"orderBy,omitempty"`
 	Take    *int                `json:"take,omitempty"`
 }
 
-// Query returns the IDs of the items (or assets) in collection that match query, in
+// Query returns the IDs of the items in collection that match query, in
 // OrderBy order. It reads the in-memory index of field values and decrypts
 // nothing. A field the schema does not define, or an operator or value that
 // does not fit the field's type, is a *ContentError with StatusInvalidArgument;

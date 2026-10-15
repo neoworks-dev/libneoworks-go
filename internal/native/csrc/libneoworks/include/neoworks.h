@@ -222,27 +222,29 @@ NW_API int nw_client_complete_descriptor_check(nw_client* client, const char* co
  * {"path": "Event.attendees[2].email", "reason": "is not a valid email"}; null after a success. */
 NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
 
-/* request: {"parentId": id|null, "collection": "@scope/name", "kind": ..., "content": {...},
- *           "blob": {...}?}. content is a JSON object of the schema's model for the kind (contract
- * amendment 7 JSON mapping); roots take none. An item created with a "blob" is an asset: its
- * content is the schema's asset model and the blob is its one file. Every other node is created
- * without a blob. Writes the new node id. NW_ERR_INVALID_ARGUMENT: the content does not fit the
- * schema (or a blob was given for a node that cannot carry a file), see
- * nw_client_last_content_error. If the node is shared, the people it is shared with also get
- * read access to the nodes its content refers to, where the creator may share them. */
+/* request: {"parentId": id|null, "collection": "@scope/name", "kind": ..., "content": {...}}.
+ * content is a JSON object of the schema's model for the kind (contract amendment 7 JSON mapping);
+ * roots take none. A File value in it, {"objectId", "name", "mediaType", "size", "variants"}, names
+ * the storage objects of the file and its variants; the core lists them on the node, with their
+ * chunk counts, and the host uploads them with nw_blob_upload_begin. Writes the new node id.
+ * NW_ERR_INVALID_ARGUMENT: the content does not fit the schema, or an object id is used by more
+ * than one file of the node, see nw_client_last_content_error. If the node is shared, the people
+ * it is shared with also get read access to the nodes its content refers to, where the creator may
+ * share them. */
 NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer* node_id);
 /* A shortcut under "parentId" to the item "targetId" of the same collection: whoever can open the
  * parent holds at most "targetRole" ("read" | "write") on the target. The creator needs that role
  * on the target. request: {"parentId", "targetId", "targetRole"}. Writes the new node id. */
 NW_API int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id);
-/* request: {"nodeId": id, "changes": {...}, "blob": {...}?}. A field in changes replaces the
- * stored value, null clears it, and fields not given keep their value. "blob" replaces an asset's
- * file; giving it for a node that is not an asset is NW_ERR_INVALID_ARGUMENT. A reference added to
- * a shared node is granted to the people it is shared with, as on creation. */
+/* request: {"nodeId": id, "changes": {...}}. A field in changes replaces the stored value, null
+ * clears it, and fields not given keep their value. The node's file list follows its File values.
+ * A reference added to a shared node is granted to the people it is shared with, as on creation. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 NW_API int nw_client_delete_node(nw_client* client, const char* node_id, int recursive);
 /* Writes the fields of the facets this client can open as one JSON object. Roots and shortcuts read
- * as {}. NW_ERR_NOT_FOUND: no such node or no facet this client can open. */
+ * as {}. NW_ERR_NOT_FOUND: no such node or no facet this client can open. NW_ERR_INTEGRITY: the
+ * node's file list does not match the File values in its content; the node is then reported as an
+ * integrity failure by nw_sync_report. */
 NW_API int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json);
 /* Reads an older version of a node this client holds. `version_json` is one entry of
  * GET /nodes/{id}/versions. Writes {"content": {...}, "verified": bool, "authorType", "authorId",
@@ -265,8 +267,6 @@ NW_API int nw_client_search(nw_client* client, const char* collection, const cha
  * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
  * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive"), AND, OR and NOT
  * lists or objects, and "parent": an id, id operators, or {"is": {...container fields...}}.
- * "model": "asset" queries the collection's assets, with the fields of its asset model, instead
- * of its items.
  * Timestamps compare as instants. It reads the in-memory index of field values and decrypts
  * nothing. NW_ERR_INVALID_ARGUMENT: a field the schema does not define or an operator or value
  * that does not fit the field's type, see nw_client_last_content_error for the location.
@@ -338,18 +338,19 @@ NW_API void nw_sync_free(nw_sync* sync);
 
 /* ---- Blobs -------------------------------------------------------------------- */
 
-/* Sans-IO transfer of one blob variant, in 4 MiB chunks, through presigned URLs.
+/* Sans-IO transfer of one file of a node, in 4 MiB chunks, through presigned URLs. object_id is the
+ * "objectId" of a File value or of one of its variants; the node's file list must hold it, and its
+ * size and chunk count come from there (NW_ERR_NOT_FOUND otherwise).
  * Upload: the host feeds plaintext chunks on request. Download: it receives plaintext. */
-NW_API int nw_blob_upload_begin(nw_client* client, const char* node_id, uint32_t variant_index,
-                                const char* object_id, uint64_t total_size, nw_blob_transfer** out);
-NW_API int nw_blob_download_begin(nw_client* client, const char* node_id, uint32_t variant_index,
-                                  const char* object_id, uint32_t chunk_count, nw_blob_transfer** out);
+NW_API int nw_blob_upload_begin(nw_client* client, const char* node_id, const char* object_id,
+                                nw_blob_transfer** out);
+NW_API int nw_blob_download_begin(nw_client* client, const char* node_id, const char* object_id,
+                                  nw_blob_transfer** out);
 /* *state: 0 request ready, 1 need plaintext chunk `*chunk_index` (upload), 2 finished,
  * 3 plaintext chunk ready via nw_blob_take_chunk (download). */
 /* Link visitors download without an account through POST /links/{id}/presign. */
 NW_API int nw_blob_link_download_begin(nw_link_reader* reader, const char* link_id, const char* node_id,
-                                       uint32_t variant_index, const char* object_id, uint32_t chunk_count,
-                                       nw_blob_transfer** out);
+                                       const char* object_id, nw_blob_transfer** out);
 NW_API int nw_blob_next(nw_blob_transfer* transfer, int* state, uint32_t* chunk_index, nw_buffer* meta_json,
                         nw_buffer* body);
 NW_API int nw_blob_provide_chunk(nw_blob_transfer* transfer, const uint8_t* plaintext, size_t length);

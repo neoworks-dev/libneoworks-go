@@ -1,4 +1,5 @@
 #include "client.hpp"
+#include "files.hpp"
 #include "node_content.hpp"
 
 namespace nw {
@@ -106,12 +107,23 @@ Result<FacetMap> Client::encodeNewContent(const CreateNodeRequest& request) {
   if (request.kind == "root") {
     return FacetMap();
   }
-  Result<const NodeDescriptor*> descriptor =
-      nodeDescriptorFor(request.collection, contentKindFor(request.kind, request.blob.has_value()));
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(request.collection, request.kind);
   if (!descriptor.ok()) {
     return descriptor.status();
   }
   return encodeContent(*descriptor.value(), request.content, FacetMap(), false, lastContentError_);
+}
+
+Result<std::vector<NodeFile>> Client::filesOfContent(const std::string& collection, const std::string& kind,
+                                                     const FacetMap& plaintexts) {
+  if (kind == "root") {
+    return std::vector<NodeFile>();
+  }
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(collection, kind);
+  if (!descriptor.ok()) {
+    return descriptor.status();
+  }
+  return filesOfFacets(*descriptor.value(), plaintexts, lastContentError_);
 }
 
 Result<std::string> Client::createNode(const CreateNodeRequest& request) {
@@ -125,17 +137,12 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
   if (isRoot && signer_.authorType != "user") {
     return Status::Forbidden;
   }
-  if (request.blob.has_value() && request.kind != "item") {
-    lastContentError_ = contentError(Status::InvalidArgument, request.kind, "only an asset carries a file");
-    return Status::InvalidArgument;
-  }
   Node node;
   node.id = newUuid();
   node.parentId = request.parentId;
   node.collection = request.collection;
   node.kind = request.kind;
   node.epoch = 1;
-  node.blob = request.blob;
   node.createdAt = nowText();
   node.updatedAt = node.createdAt;
   node.ownerId = signer_.authorId;
@@ -150,6 +157,11 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
   if (!plaintexts.ok()) {
     return plaintexts.status();
   }
+  Result<std::vector<NodeFile>> files = filesOfContent(node.collection, node.kind, plaintexts.value());
+  if (!files.ok()) {
+    return files.status();
+  }
+  node.files = files.take();
   sealContent(node, nodeKey, plaintexts.value());
   Status stored = signAndStore(node);
   if (stored != Status::Ok) {
@@ -210,10 +222,6 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (local == nullptr || local->node.deleted) {
     return Status::NotFound;
   }
-  if (request.blob.has_value() && !local->node.blob.has_value()) {
-    lastContentError_ = contentError(Status::InvalidArgument, request.nodeId, "only an asset carries a file");
-    return Status::InvalidArgument;
-  }
   if (!request.changes.is_object() || (!carriesContent(local->node) && !request.changes.empty())) {
     return Status::InvalidArgument;
   }
@@ -230,7 +238,7 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   }
   FacetMap plaintexts = previous.value();
   if (carriesContent(local->node)) {
-    Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(local->node.collection, contentKindOf(local->node));
+    Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(local->node.collection, local->node.kind);
     if (!descriptor.ok()) {
       return descriptor.status();
     }
@@ -242,10 +250,14 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   }
   Node node = local->node;
   node.baseSeq = node.seq;
-  if (request.blob.has_value()) {
-    node.blob = request.blob;
-  }
   node.updatedAt = nowText();
+  if (carriesContent(node)) {
+    Result<std::vector<NodeFile>> files = filesOfContent(node.collection, node.kind, plaintexts);
+    if (!files.ok()) {
+      return files.status();
+    }
+    node.files = files.take();
+  }
   sealContent(node, nodeKey.value(), plaintexts);
   Status stored = signAndStore(node);
   if (stored == Status::Ok) {
@@ -274,7 +286,7 @@ Status Client::deleteNode(const std::string& nodeId, bool recursive) {
   node.baseSeq = node.seq;
   node.deleted = true;
   node.content.clear();
-  node.blob = std::nullopt;
+  node.files.clear();
   node.updatedAt = nowText();
   return signAndStore(node);
 }
@@ -312,7 +324,7 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (!carriesContent(node)) {
     return Json::object();
   }
-  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node.collection, contentKindOf(node));
+  Result<const NodeDescriptor*> descriptor = nodeDescriptorFor(node.collection, node.kind);
   if (!descriptor.ok()) {
     return descriptor.status();
   }
@@ -336,7 +348,15 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
 #if defined(NW_ENABLE_TEST_HOOKS)
   ++contentDecryptions_;
 #endif
-  return decodeContent(*descriptor.value(), readable.value(), lastContentError_);
+  Result<Json> content = decodeContent(*descriptor.value(), readable.value(), lastContentError_);
+  if (!content.ok()) {
+    return content.status();
+  }
+  if (checkNodeFiles(*descriptor.value(), node, readable.value(), content.value()) != Status::Ok) {
+    database_->recordIntegrityFailure(node.id, "file list does not match the content");
+    return Status::IntegrityFailure;
+  }
+  return content;
 }
 
 Result<Json> Client::readNode(const std::string& nodeId) {

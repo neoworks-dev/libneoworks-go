@@ -10,22 +10,23 @@
 
 namespace nw {
 
-// Sans-IO transfer of one blob variant in 4 MiB chunks through presigned URLs.
-// Chunks are presigned in windows so long transfers do not outlive their URLs.
+// Sans-IO transfer of one file of a node, original or variant, in 4 MiB chunks through presigned
+// URLs. The file is named by its object id, which the node's file list must hold; its size and
+// chunk count come from that entry. Chunks are presigned in windows so long transfers do not
+// outlive their URLs.
 class BlobTransfer {
  public:
   enum class State { RequestReady, NeedChunk, ChunkReady, Finished, Failed };
 
+  // NotFound: the node does not list the object.
   static Result<std::unique_ptr<BlobTransfer>> beginUpload(Client& client, const std::string& nodeId,
-                                                           uint32_t variantIndex, const std::string& objectId,
-                                                           uint64_t totalSize);
+                                                           const std::string& objectId);
   static Result<std::unique_ptr<BlobTransfer>> beginDownload(Client& client, const std::string& nodeId,
-                                                             uint32_t variantIndex, const std::string& objectId,
-                                                             uint32_t chunkCount);
+                                                             const std::string& objectId);
   // Download for a link share: presigned through POST /links/{id}/presign, no account.
   static Result<std::unique_ptr<BlobTransfer>> beginLinkDownload(LinkReader& reader, const std::string& linkId,
-                                                                 const std::string& nodeId, uint32_t variantIndex,
-                                                                 const std::string& objectId, uint32_t chunkCount);
+                                                                 const std::string& nodeId,
+                                                                 const std::string& objectId);
 
   State state();
   const HttpRequest& request() const { return request_; }

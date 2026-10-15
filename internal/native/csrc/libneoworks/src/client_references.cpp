@@ -57,7 +57,7 @@ void Client::walkReferences(ReferenceWalk& walk, const Node& node, const FacetTa
   if (entry == nullptr || schema == nullptr) {
     return;
   }
-  const NodeDescriptor* descriptor = schema->nodeByKind(entry->model);
+  const NodeDescriptor* descriptor = schema->nodeByKind(entry->kind);
   for (const IndexedReference& reference : entry->references) {
     const FacetDescriptor* facet = nullptr;
     if (descriptor != nullptr) {
@@ -216,8 +216,8 @@ void Client::grantReferencesToHolders(const std::string& nodeId) {
     share.principalId = personId;
     share.principalEncPub = encPub.take();
     for (const std::string& referencedId : referenced) {
-      const Node* asset = database_->findNode(referencedId);
-      if (asset != nullptr && canManageAccess(*asset)) {
+      const Node* referencedNode = database_->findNode(referencedId);
+      if (referencedNode != nullptr && canManageAccess(*referencedNode)) {
         grantReferenced(referencedId, share);
       }
     }

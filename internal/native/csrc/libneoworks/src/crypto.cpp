@@ -138,6 +138,12 @@ SymmetricKey kdf(const SymmetricKey& key, uint64_t subkeyId, std::string_view co
   return subkey;
 }
 
+SymmetricKey keyedHash(const SymmetricKey& key, ByteView input) {
+  SymmetricKey derived = SymmetricKey::zeroed();
+  crypto_generichash(derived.mutableData(), kKeyBytes, input.data(), input.size(), key.data(), kKeyBytes);
+  return derived;
+}
+
 Bytes hash(ByteView message) {
   Bytes digest(crypto_generichash_BYTES);
   crypto_generichash(digest.data(), digest.size(), message.data(), message.size(), nullptr, 0);

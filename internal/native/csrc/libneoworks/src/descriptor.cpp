@@ -30,6 +30,38 @@ const std::map<std::string, Scalar, std::less<>>& scalarNames() {
   return names;
 }
 
+FieldDescriptor builtInField(uint32_t ordinal, const char* name, Scalar scalar) {
+  FieldDescriptor field;
+  field.ordinal = ordinal;
+  field.name = name;
+  field.value.scalar = scalar;
+  field.required = true;
+  return field;
+}
+
+const ModelDescriptor& fileVariantModel() {
+  static const ModelDescriptor model = [] {
+    ModelDescriptor variant;
+    variant.name = "FileVariant";
+    variant.fields.push_back(builtInField(1, "objectId", Scalar::Uuid));
+    variant.fields.push_back(builtInField(2, "size", Scalar::U64));
+    return variant;
+  }();
+  return model;
+}
+
+FieldDescriptor builtInVariantsField() {
+  FieldDescriptor field;
+  field.ordinal = 5;
+  field.name = "variants";
+  field.container.kind = ContainerKind::Map;
+  field.container.mapKey = Scalar::String;
+  field.value.kind = ValueKind::Message;
+  field.value.name = "FileVariant";
+  field.value.model = &fileVariantModel();
+  return field;
+}
+
 bool hasOnlyKeys(const Json& object, std::initializer_list<const char*> allowed) {
   if (!object.is_object()) {
     return false;
@@ -204,6 +236,17 @@ std::optional<ValueShape> parseDecimal(const Json& json) {
   return shape;
 }
 
+std::optional<ValueShape> parseFile(const Json& json) {
+  if (!hasOnlyKeys(json, {"kind"})) {
+    return std::nullopt;
+  }
+  ValueShape shape;
+  shape.kind = ValueKind::File;
+  shape.name = fileModel().name;
+  shape.model = &fileModel();
+  return shape;
+}
+
 std::optional<ValueShape> parseNamed(const Json& json, ValueKind kind) {
   std::optional<std::string> name = readString(json, "name");
   if (!hasOnlyKeys(json, {"kind", "name"}) || !name.has_value()) {
@@ -242,6 +285,9 @@ std::optional<ValueShape> parseValue(const Json& json, size_t depth) {
   }
   if (*kind == "decimal") {
     return parseDecimal(json);
+  }
+  if (*kind == "file") {
+    return parseFile(json);
   }
   if (*kind == "oneof") {
     return parseOneof(json, depth);
@@ -552,7 +598,7 @@ std::optional<NodeDescriptor> parseNode(const Json& json) {
   std::optional<std::string> model = readString(json, "model");
   std::optional<std::vector<uint32_t>> searchable = readOrdinalList(json, "searchable");
   const Json* facets = readArray(json, "facets");
-  bool wellFormed = kind.has_value() && (*kind == "container" || *kind == "item" || *kind == "asset") && model.has_value() &&
+  bool wellFormed = kind.has_value() && (*kind == "container" || *kind == "item") && model.has_value() &&
                     searchable.has_value() && facets != nullptr && parseOptionalOrdinal(json, "title", node.title) &&
                     parseOptionalTimeRange(json, node.timeRange);
   if (!wellFormed) {
@@ -620,8 +666,13 @@ bool facetsPartitionModel(const NodeDescriptor& node) {
   return covered.size() == node.model->fields.size();
 }
 
-bool isStringField(const FieldDescriptor* field, bool allowLists) {
-  if (field == nullptr || field->value.kind != ValueKind::Scalar || field->value.scalar != Scalar::String) {
+bool isTextValue(const ValueShape& value) {
+  return value.kind == ValueKind::File || (value.kind == ValueKind::Scalar && value.scalar == Scalar::String);
+}
+
+// A string or a File, which is indexed by its name.
+bool isTextField(const FieldDescriptor* field, bool allowLists) {
+  if (field == nullptr || !isTextValue(field->value)) {
     return false;
   }
   ContainerKind kind = field->container.kind;
@@ -637,8 +688,8 @@ bool isSingularTimestamp(const FieldDescriptor* field) {
 bool indexesFitModel(const NodeDescriptor& node) {
   const ModelDescriptor& model = *node.model;
   bool searchableFit = std::all_of(node.searchable.begin(), node.searchable.end(),
-                                   [&](uint32_t ordinal) { return isStringField(model.fieldByOrdinal(ordinal), true); });
-  bool titleFits = !node.title.has_value() || isStringField(model.fieldByOrdinal(*node.title), false);
+                                   [&](uint32_t ordinal) { return isTextField(model.fieldByOrdinal(ordinal), true); });
+  bool titleFits = !node.title.has_value() || isTextField(model.fieldByOrdinal(*node.title), false);
   if (!node.timeRange.has_value()) {
     return searchableFit && titleFits;
   }
@@ -686,6 +737,20 @@ bool parseList(const Json& json, const char* key, std::vector<Item>& into, Parse
 }
 
 }  // namespace
+
+const ModelDescriptor& fileModel() {
+  static const ModelDescriptor model = [] {
+    ModelDescriptor file;
+    file.name = "File";
+    file.fields.push_back(builtInField(1, "objectId", Scalar::Uuid));
+    file.fields.push_back(builtInField(2, "name", Scalar::String));
+    file.fields.push_back(builtInField(3, "mediaType", Scalar::String));
+    file.fields.push_back(builtInField(4, "size", Scalar::U64));
+    file.fields.push_back(builtInVariantsField());
+    return file;
+  }();
+  return model;
+}
 
 const FieldDescriptor* ModelDescriptor::fieldByOrdinal(uint32_t ordinal) const {
   for (const FieldDescriptor& field : fields) {
