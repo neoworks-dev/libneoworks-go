@@ -16,7 +16,4 @@ using LeafVisitor = std::function<void(const ValueShape& shape, const Json& valu
 // they sit: in lists, maps, nested messages and oneofs. In field order.
 void walkContentLeaves(const ModelDescriptor& model, const Json& content, const LeafVisitor& visit);
 
-// Whether values of this shape can contain a File, however deeply nested.
-bool shapeHoldsFile(const ValueShape& shape);
-
 }  // namespace nw

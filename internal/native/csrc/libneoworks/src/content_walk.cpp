@@ -79,34 +79,10 @@ void walkModel(const ModelDescriptor& model, const Json& content, uint32_t topLe
   }
 }
 
-bool shapeHoldsFileAtDepth(const ValueShape& shape, size_t depth);
-
-bool modelHoldsFile(const ModelDescriptor& model, size_t depth) {
-  return std::any_of(model.fields.begin(), model.fields.end(),
-                     [&](const FieldDescriptor& field) { return shapeHoldsFileAtDepth(field.value, depth); });
-}
-
-bool shapeHoldsFileAtDepth(const ValueShape& shape, size_t depth) {
-  if (depth > kMaxNesting) {
-    return false;
-  }
-  if (shape.kind == ValueKind::File) {
-    return true;
-  }
-  if (shape.kind == ValueKind::Message && shape.model != nullptr) {
-    return modelHoldsFile(*shape.model, depth + 1);
-  }
-  return std::any_of(shape.variants.begin(), shape.variants.end(), [&](const OneofVariantDescriptor& variant) {
-    return shapeHoldsFileAtDepth(variant.value, depth + 1);
-  });
-}
-
 }  // namespace
 
 void walkContentLeaves(const ModelDescriptor& model, const Json& content, const LeafVisitor& visit) {
   walkModel(model, content, 0, 0, visit);
 }
-
-bool shapeHoldsFile(const ValueShape& shape) { return shapeHoldsFileAtDepth(shape, 0); }
 
 }  // namespace nw

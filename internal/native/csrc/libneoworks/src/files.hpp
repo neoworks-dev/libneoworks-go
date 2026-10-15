@@ -17,10 +17,9 @@ Result<std::vector<NodeFile>> collectFiles(const ModelDescriptor& model, const J
 Result<std::vector<NodeFile>> filesOfFacets(const NodeDescriptor& descriptor, const FacetMap& plaintexts,
                                             CodecError& error);
 
-// IntegrityFailure unless the plain list of `node` agrees with the files in `content`, the
-// decoded `readable` facets. A reader who opens every facet that holds a File needs the two to be
-// the same set; a reader with fewer facets needs what it sees to be in the list.
-Status checkNodeFiles(const NodeDescriptor& descriptor, const Node& node, const FacetMap& readable,
-                      const Json& content);
+// IntegrityFailure unless every file in `content`, the decoded readable facets of `node`, is in
+// the plain list of `node`. The list may hold more: a reader whose descriptor predates a File
+// field does not see that field's files, and opening them needs the record's key anyway.
+Status checkNodeFiles(const NodeDescriptor& descriptor, const Node& node, const Json& content);
 
 }  // namespace nw

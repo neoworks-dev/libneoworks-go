@@ -155,7 +155,7 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
   if (!content.ok()) {
     return content.status();
   }
-  if (checkNodeFiles(*descriptor, *node, readable.value(), content.value()) != Status::Ok) {
+  if (checkNodeFiles(*descriptor, *node, content.value()) != Status::Ok) {
     return Status::IntegrityFailure;
   }
   return content;

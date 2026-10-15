@@ -124,7 +124,7 @@ Status Client::requireShareable(const std::vector<std::string>& nodeIds) {
     }
     lastContentError_.status = Status::Forbidden;
     lastContentError_.path = nodeId;
-    lastContentError_.reason = "asset_not_shareable";
+    lastContentError_.reason = "referenced_node_not_shareable";
     return Status::Forbidden;
   }
   return Status::Ok;
@@ -260,8 +260,8 @@ void Client::revokeUnreferenced(const std::string& startId, const std::string& p
     for (const std::string& rotatedId : revoked.value().rotatedNodeIds) {
       report.rotatedNodeIds.push_back(rotatedId);
     }
-    for (const std::string& stale : revoked.value().blobReencryptionRequired) {
-      report.blobReencryptionRequired.push_back(stale);
+    for (const std::string& stale : revoked.value().fileReencryptionRequired) {
+      report.fileReencryptionRequired.push_back(stale);
     }
   }
 }

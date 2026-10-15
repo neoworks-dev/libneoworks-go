@@ -352,7 +352,7 @@ Result<Json> Client::readContent(const Node& node, const SymmetricKey* nodeKey) 
   if (!content.ok()) {
     return content.status();
   }
-  if (checkNodeFiles(*descriptor.value(), node, readable.value(), content.value()) != Status::Ok) {
+  if (checkNodeFiles(*descriptor.value(), node, content.value()) != Status::Ok) {
     database_->recordIntegrityFailure(node.id, "file list does not match the content");
     return Status::IntegrityFailure;
   }

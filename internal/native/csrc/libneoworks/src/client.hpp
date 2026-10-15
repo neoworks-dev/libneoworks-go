@@ -60,7 +60,7 @@ struct RotationReport {
   std::vector<std::string> rotatedNodeIds;
   // The chunks of a node's files stay encrypted under the previous epoch's key; the app must
   // re-encrypt and re-upload them for the new key chain.
-  std::vector<std::string> blobReencryptionRequired;
+  std::vector<std::string> fileReencryptionRequired;
 };
 
 struct LinkRecord {
@@ -308,7 +308,7 @@ class Client {
   void walkReferences(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
   void walkReference(ReferenceWalk& walk, const std::string& nodeId) const;
   bool isWithin(const std::string& nodeId, const std::string& ancestorId) const;
-  // Refuses with the node as `lastContentError` path and "asset_not_shareable" when this holder
+  // Refuses with the node as `lastContentError` path and "referenced_node_not_shareable" when this holder
   // cannot hand out one of the nodes.
   Status requireShareable(const std::vector<std::string>& nodeIds);
   bool principalHasAccess(const Node& node, const std::string& principalType, const std::string& principalId) const;
