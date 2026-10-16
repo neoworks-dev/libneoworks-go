@@ -74,20 +74,12 @@ Status Keyring::addGrant(const AccessGrant& grant, ByteView encPub, ByteView enc
   return Status::Ok;
 }
 
-Result<SymmetricKey> Keyring::unwrapUnderParent(const Node& node, const Node& parent, const NodeLookup& lookup,
-                                                int depth) {
-  std::map<uint32_t, SymmetricKey> candidates;
-  auto known = nodeKeys_.find(parent.id);
-  if (known != nodeKeys_.end()) {
-    for (const auto& [epoch, key] : known->second) {
-      candidates.insert_or_assign(epoch, key.clone());
-    }
+Result<SymmetricKey> Keyring::unwrapWithKnownKeys(const Node& node, const std::string& parentId) const {
+  auto known = nodeKeys_.find(parentId);
+  if (known == nodeKeys_.end()) {
+    return Status::NotFound;
   }
-  Result<SymmetricKey> derived = resolveWithDepth(parent, lookup, depth + 1);
-  if (derived.ok()) {
-    candidates.insert_or_assign(parent.epoch, derived.take());
-  }
-  for (auto candidate = candidates.rbegin(); candidate != candidates.rend(); ++candidate) {
+  for (auto candidate = known->second.rbegin(); candidate != known->second.rend(); ++candidate) {
     Result<SymmetricKey> unwrapped = unwrapNodeKey(candidate->second, *node.wrappedKey, node.id, node.parentId,
                                                    node.epoch, candidate->first);
     if (unwrapped.ok()) {
@@ -95,6 +87,28 @@ Result<SymmetricKey> Keyring::unwrapUnderParent(const Node& node, const Node& pa
     }
   }
   return Status::NotFound;
+}
+
+void Keyring::addPreviousKeys(const Node& node, const SymmetricKey& nodeKey) {
+  Result<KeyHistory> history = previousNodeKeys(node, nodeKey);
+  if (!history.ok()) {
+    return;
+  }
+  for (auto& [epoch, key] : history.value()) {
+    addNodeKey(node.id, epoch, std::move(key));
+  }
+}
+
+// A child still wrapped under an earlier key of its parent opens with the parent's key history.
+Result<SymmetricKey> Keyring::unwrapUnderParent(const Node& node, const Node& parent, const NodeLookup& lookup,
+                                                int depth) {
+  Result<SymmetricKey> parentKey = resolveWithDepth(parent, lookup, depth + 1);
+  Result<SymmetricKey> unwrapped = unwrapWithKnownKeys(node, parent.id);
+  if (unwrapped.ok() || !parentKey.ok()) {
+    return unwrapped;
+  }
+  addPreviousKeys(parent, parentKey.value());
+  return unwrapWithKnownKeys(node, parent.id);
 }
 
 Result<SymmetricKey> Keyring::unwrapThroughParent(const Node& node, const NodeLookup& lookup, int depth) {

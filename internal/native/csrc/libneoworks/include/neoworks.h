@@ -293,18 +293,14 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
  * Grants and revocations are queued and sent by the next sync. */
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
- *           "recipient": <identity json>}. Writes the signed AccessGrant JSON.
- * Sharing with a user also grants that user read access to every node the shared content refers
- * to (fields declared ref<Model>), recursively and through shortcuts, unless they already can open
- * it; the facets limit which fields count. If this holder may not share one of those nodes, nothing
- * is granted: NW_ERR_FORBIDDEN, and nw_client_last_content_error gives {"path": <that node's id>,
- * "reason": "referenced_node_not_shareable"}. */
+ *           "recipient": <identity json>}. Writes the signed AccessGrant JSON. One grant on the
+ * node; a ref<Model> in its content is an id, and grants nothing on the node it names. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
-/* Removes a principal and rotates the node key and every descendant key so it cannot read
- * later writes. A user also loses the grants they hold on nodes the content referred to, unless
- * another node they can still open refers to the same node; those nodes rotate too and are
- * listed in the report. report_json: {"rotatedNodeIds": [...]}. Files are not touched: their keys
- * live in the content, which is encrypted again with the new node key. */
+/* Removes a principal and gives the node a new key so it cannot read later writes. The old key
+ * stays in the node's key history, so nodes below it that are still wrapped under it remain
+ * readable; each moves to a new key at its own next write. An ancestor still wrapped under an
+ * earlier key of its parent moves first. report_json: {"rotatedNodeIds": [...]}. Files are not
+ * touched: their keys live in the content, which is encrypted again with the new node key. */
 NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
                                    const char* principal_id, nw_buffer* report_json);
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);

@@ -1,19 +1,12 @@
 #include <sodium.h>
 
 #include <algorithm>
-#include <deque>
 
 #include "client.hpp"
+#include "key_history.hpp"
 #include "tlv.hpp"
 
 namespace nw {
-
-namespace {
-
-constexpr size_t kMaxRotationNodes = 100000;
-
-
-}  // namespace
 
 Result<Bytes> Client::encPubFor(const std::string& principalType, const std::string& principalId) const {
   if (principalType == signer_.authorType && principalId == signer_.authorId) {
@@ -124,7 +117,6 @@ Result<AccessGrant> Client::grantNode(const ShareRequest& request) {
   return grant;
 }
 
-// Sharing with a person also grants read access to every node the shared content refers to.
 Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
   lastContentError_ = CodecError{};
   const Node* node = database_->findNode(request.nodeId);
@@ -136,25 +128,7 @@ Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
   if (!allowed || !withinOwnRole || !isValidRole(request.role)) {
     return Status::Forbidden;
   }
-  std::vector<std::string> referenced;
-  if (request.principalType == "user") {
-    referenced = referencedNodesOf(request.nodeId, request.facets);
-    Status shareable = requireShareable(referenced);
-    if (shareable != Status::Ok) {
-      return shareable;
-    }
-  }
-  Result<AccessGrant> grant = grantNode(request);
-  if (!grant.ok()) {
-    return grant;
-  }
-  for (const std::string& referencedId : referenced) {
-    Status granted = grantReferenced(referencedId, request);
-    if (granted != Status::Ok) {
-      return granted;
-    }
-  }
-  return grant;
+  return grantNode(request);
 }
 
 Status Client::queueRevocation(const std::string& nodeId, const std::string& principalType,
@@ -173,13 +147,14 @@ struct Client::RotationStep {
   FacetMap plaintexts;
   std::vector<AccessGrant> remainingGrants;
   std::vector<Bytes> remainingEncPubs;
+  SymmetricKey oldKey;
   SymmetricKey newKey;
   uint32_t newEpoch = 0;
-  // A shortcut's key and epoch are its target's; only its wrapping under the parent changes.
-  bool isShortcut = false;
 };
 
 namespace {
+
+constexpr int kMaxAncestorWalk = 64;
 
 bool isExcluded(const AccessGrant& grant, const std::string& removedType, const std::string& removedId) {
   return grant.principalType == removedType && grant.principalId == removedId;
@@ -215,40 +190,13 @@ Result<Client::RotationStep> Client::planNodeRotation(const Node& node, const st
     step.remainingGrants.push_back(grant);
     step.remainingEncPubs.push_back(encPub.take());
   }
-  step.isShortcut = isShortcut(node);
+  if (!step.remainingGrants.empty() && !canManageAccess(node)) {
+    return Status::Forbidden;
+  }
+  step.oldKey = oldKey.take();
   step.newKey = SymmetricKey::random();
   step.newEpoch = node.epoch + 1;
-  if (step.isShortcut) {
-    step.newKey = oldKey.value().clone();
-    step.newEpoch = node.epoch;
-  }
   return step;
-}
-
-Result<std::vector<Client::RotationStep>> Client::planRotation(const std::string& nodeId,
-                                                               const std::string& removedType,
-                                                               const std::string& removedId) {
-  std::vector<RotationStep> steps;
-  std::deque<std::string> queue{nodeId};
-  while (!queue.empty()) {
-    if (steps.size() > kMaxRotationNodes) {
-      return Status::Malformed;
-    }
-    const Node* node = database_->findNode(queue.front());
-    queue.pop_front();
-    if (node == nullptr || node->deleted) {
-      continue;
-    }
-    Result<RotationStep> step = planNodeRotation(*node, removedType, removedId);
-    if (!step.ok()) {
-      return step.status();
-    }
-    steps.push_back(step.take());
-    for (const std::string& childId : database_->childrenOf(node->id)) {
-      queue.push_back(childId);
-    }
-  }
-  return steps;
 }
 
 Status Client::applyRotationStep(RotationStep& step, const SymmetricKey* newParentKey, uint32_t newParentEpoch) {
@@ -267,125 +215,124 @@ Status Client::applyRotationStep(RotationStep& step, const SymmetricKey* newPare
   keyring_.addNodeKey(node.id, node.epoch, step.newKey.clone());
   indexPendingNodes();
   for (size_t index = 0; index < step.remainingGrants.size(); ++index) {
-    const AccessGrant& old = step.remainingGrants[index];
-    GrantRequest request;
-    request.nodeId = old.nodeId;
-    request.principalType = old.principalType;
-    request.principalId = old.principalId;
-    request.role = old.role;
-    request.facets = old.facets;
-    request.epoch = node.epoch;
-    request.principalEncPub = step.remainingEncPubs[index];
-    request.grantedByType = signer_.authorType;
-    request.grantedById = signer_.authorId;
-    Result<std::string> certId = grantCertificateFor(old.principalType, old.principalId);
-    if (!certId.ok()) {
-      return certId.status();
-    }
-    if (!certId.value().empty()) {
-      request.certId = certId.value();
-    }
-    request.createdAt = nowText();
-    Result<AccessGrant> grant = createGrant(request, step.newKey);
-    if (!grant.ok()) {
-      return grant.status();
-    }
-    database_->putGrant(grant.value());
-    queueGrant(grant.value());
-  }
-  return Status::Ok;
-}
-
-Result<RotationReport> Client::rotateSubtree(const std::string& nodeId, const std::string& removedType,
-                                             const std::string& removedId) {
-  Result<std::vector<RotationStep>> plan = planRotation(nodeId, removedType, removedId);
-  if (!plan.ok()) {
-    return plan.status();
-  }
-  RotationReport report;
-  std::map<std::string, std::pair<SymmetricKey, uint32_t>> rotated;
-  for (RotationStep& step : plan.value()) {
-    SymmetricKey parentKey;
-    uint32_t parentEpoch = 0;
-    Status parentStatus = parentForStep(step, rotated, parentKey, parentEpoch);
-    if (parentStatus != Status::Ok) {
-      return parentStatus;
-    }
-    Status applied = applyRotationStep(step, &parentKey, parentEpoch);
-    if (applied != Status::Ok) {
-      return applied;
-    }
-    rotated.emplace(step.nodeId, std::make_pair(step.newKey.clone(), step.newEpoch));
-    report.rotatedNodeIds.push_back(step.nodeId);
-  }
-  Status rekeyed = rekeyShortcuts(rotated, removedType, removedId, report);
-  if (rekeyed != Status::Ok) {
-    return rekeyed;
-  }
-  return report;
-}
-
-// A shortcut carries its target's key wrapped under its parent, so a target that got a new key
-// leaves its shortcuts on the old one. Wraps the new key and epoch for each, in the same operation.
-Status Client::rekeyShortcuts(const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                              const std::string& removedType, const std::string& removedId,
-                              RotationReport& report) {
-  for (const auto& [targetId, rotatedKey] : rotated) {
-    for (const std::string& shortcutId : database_->shortcutsTo(targetId)) {
-      Status rekeyed = rekeyShortcut(shortcutId, rotatedKey, rotated, removedType, removedId);
-      if (rekeyed != Status::Ok) {
-        return rekeyed;
-      }
-      if (rotated.find(shortcutId) == rotated.end()) {
-        report.rotatedNodeIds.push_back(shortcutId);
-      }
+    Status reissued = reissueGrant(step.remainingGrants[index], step.remainingEncPubs[index], node.epoch, step.newKey);
+    if (reissued != Status::Ok) {
+      return reissued;
     }
   }
   return Status::Ok;
 }
 
-Status Client::rekeyShortcut(const std::string& shortcutId, const std::pair<SymmetricKey, uint32_t>& targetKey,
-                             const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                             const std::string& removedType, const std::string& removedId) {
-  const Node* shortcut = database_->findNode(shortcutId);
-  if (shortcut->deleted) {
-    return Status::Ok;
+Status Client::reissueGrant(const AccessGrant& old, const Bytes& encPub, uint32_t epoch, const SymmetricKey& nodeKey) {
+  GrantRequest request;
+  request.nodeId = old.nodeId;
+  request.principalType = old.principalType;
+  request.principalId = old.principalId;
+  request.role = old.role;
+  request.facets = old.facets;
+  request.epoch = epoch;
+  request.principalEncPub = encPub;
+  request.grantedByType = signer_.authorType;
+  request.grantedById = signer_.authorId;
+  Result<std::string> certId = grantCertificateFor(old.principalType, old.principalId);
+  if (!certId.ok()) {
+    return certId.status();
   }
-  // Only shortcuts whose parent key this client holds can be re-wrapped here.
-  Result<RotationStep> step = planNodeRotation(*shortcut, removedType, removedId);
-  if (step.status() == Status::NotFound) {
-    return Status::Ok;
+  if (!certId.value().empty()) {
+    request.certId = certId.value();
   }
+  request.createdAt = nowText();
+  Result<AccessGrant> grant = createGrant(request, nodeKey);
+  if (!grant.ok()) {
+    return grant.status();
+  }
+  database_->putGrant(grant.value());
+  return queueGrant(grant.value());
+}
+
+// A new key at the next epoch, wrapped under the parent's current key, with the old one kept in the
+// key history; the records below stay wrapped under the old key until their own next change.
+Status Client::rotateNode(const std::string& nodeId, const std::string& removedType, const std::string& removedId,
+                          const ContentChange* change, RotationReport& report) {
+  const Node* node = database_->findNode(nodeId);
+  if (node == nullptr || node->deleted || isShortcut(*node)) {
+    return Status::NotFound;
+  }
+  if (roleRank(effectiveRole(nodeId)) < roleRank("write")) {
+    return Status::Forbidden;
+  }
+  Result<RotationStep> step = planNodeRotation(*node, removedType, removedId);
   if (!step.ok()) {
     return step.status();
   }
-  step.value().newKey = targetKey.first.clone();
-  step.value().newEpoch = targetKey.second;
+  if (change != nullptr) {
+    step.value().plaintexts = change->plaintexts;
+    step.value().node.files = change->files;
+  }
+  Status kept = appendKeyHistory(step.value().plaintexts, node->epoch, step.value().oldKey);
+  if (kept != Status::Ok) {
+    return kept;
+  }
   SymmetricKey parentKey;
   uint32_t parentEpoch = 0;
-  Status parentStatus = parentForStep(step.value(), rotated, parentKey, parentEpoch);
-  if (parentStatus == Status::NotFound) {
+  Status parentStatus = currentParentKey(step.value().node, parentKey, parentEpoch);
+  if (parentStatus != Status::Ok) {
+    return parentStatus;
+  }
+  Status applied = applyRotationStep(step.value(), &parentKey, parentEpoch);
+  if (applied != Status::Ok) {
+    return applied;
+  }
+  report.rotatedNodeIds.push_back(nodeId);
+  if (step.value().node.kind != "item") {
     return Status::Ok;
   }
+  return rekeyShortcuts(nodeId, step.value().newKey, step.value().newEpoch, report);
+}
+
+// A shortcut carries its target's key wrapped under its parent, so every shortcut to a target that got a
+// new key is wrapped again with it, under a parent whose own key is current.
+Status Client::rekeyShortcuts(const std::string& targetId, const SymmetricKey& targetKey, uint32_t targetEpoch,
+                              RotationReport& report) {
+  for (const std::string& shortcutId : database_->shortcutsTo(targetId)) {
+    const Node* shortcut = database_->findNode(shortcutId);
+    if (!canRewrapShortcut(*shortcut)) {
+      continue;
+    }
+    Status refreshed = refreshKeys(*shortcut->parentId, report);
+    if (refreshed != Status::Ok) {
+      return refreshed;
+    }
+    Status rekeyed = rekeyShortcut(shortcutId, targetKey, targetEpoch);
+    if (rekeyed != Status::Ok) {
+      return rekeyed;
+    }
+    report.rotatedNodeIds.push_back(shortcutId);
+  }
+  return Status::Ok;
+}
+
+Status Client::rekeyShortcut(const std::string& shortcutId, const SymmetricKey& targetKey, uint32_t targetEpoch) {
+  Result<RotationStep> step = planNodeRotation(*database_->findNode(shortcutId), "", "");
+  if (!step.ok()) {
+    return step.status();
+  }
+  step.value().newKey = targetKey.clone();
+  step.value().newEpoch = targetEpoch;
+  SymmetricKey parentKey;
+  uint32_t parentEpoch = 0;
+  Status parentStatus = currentParentKey(step.value().node, parentKey, parentEpoch);
   if (parentStatus != Status::Ok) {
     return parentStatus;
   }
   return applyRotationStep(step.value(), &parentKey, parentEpoch);
 }
 
-Status Client::parentForStep(const RotationStep& step,
-                             const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                             SymmetricKey& parentKey, uint32_t& parentEpoch) {
-  if (!step.node.parentId.has_value()) {
+Status Client::currentParentKey(const Node& node, SymmetricKey& parentKey, uint32_t& parentEpoch) {
+  if (!node.parentId.has_value()) {
     return Status::Ok;
   }
-  auto already = rotated.find(*step.node.parentId);
-  if (already != rotated.end()) {
-    parentKey = already->second.first.clone();
-    parentEpoch = already->second.second;
-    return Status::Ok;
-  }
-  const Node* parent = database_->findNode(*step.node.parentId);
+  const Node* parent = database_->findNode(*node.parentId);
   if (parent == nullptr) {
     return Status::NotFound;
   }
@@ -396,6 +343,106 @@ Status Client::parentForStep(const RotationStep& step,
   parentKey = resolved.take();
   parentEpoch = parent->epoch;
   return Status::Ok;
+}
+
+Client::Wrapping Client::wrappingOf(const Node& node) {
+  if (!node.parentId.has_value() || !node.wrappedKey.has_value()) {
+    return Wrapping::Unknown;
+  }
+  const Node* parent = database_->findNode(*node.parentId);
+  if (parent == nullptr) {
+    return Wrapping::Unknown;
+  }
+  Result<SymmetricKey> parentKey = keyring_.resolveNodeKey(*parent, nodeLookup());
+  if (!parentKey.ok()) {
+    return Wrapping::Unknown;
+  }
+  Result<SymmetricKey> unwrapped =
+      unwrapNodeKey(parentKey.value(), *node.wrappedKey, node.id, node.parentId, node.epoch, parent->epoch);
+  if (!unwrapped.ok()) {
+    return Wrapping::Stale;
+  }
+  return Wrapping::Current;
+}
+
+std::vector<std::string> Client::exposedChainOf(const std::string& nodeId) {
+  std::vector<std::string> path;
+  size_t exposedLength = 0;
+  const Node* cursor = database_->findNode(nodeId);
+  for (int step = 0; step < kMaxAncestorWalk && cursor != nullptr; ++step) {
+    path.push_back(cursor->id);
+    Wrapping wrapping = wrappingOf(*cursor);
+    if (wrapping == Wrapping::Unknown) {
+      break;
+    }
+    if (wrapping == Wrapping::Stale) {
+      exposedLength = path.size();
+    }
+    cursor = database_->findNode(*cursor->parentId);
+  }
+  path.resize(exposedLength);
+  std::reverse(path.begin(), path.end());
+  return path;
+}
+
+// Shortcuts in someone else's tree that this holder may only read are theirs to wrap again.
+bool Client::canRewrapShortcut(const Node& shortcut) {
+  bool parentKnown = !shortcut.deleted && resolveNodeKey(*shortcut.parentId).ok();
+  return parentKnown && roleRank(effectiveRole(shortcut.id)) >= roleRank("write");
+}
+
+bool Client::isExposedThroughShortcuts(const Node& node) {
+  if (node.kind != "item") {
+    return false;
+  }
+  for (const std::string& shortcutId : database_->shortcutsTo(node.id)) {
+    const Node* shortcut = database_->findNode(shortcutId);
+    if (canRewrapShortcut(*shortcut) && !exposedChainOf(shortcutId).empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+Result<bool> Client::refreshAncestors(const std::string& nodeId, RotationReport& report) {
+  std::vector<std::string> chain = exposedChainOf(nodeId);
+  for (const std::string& exposedId : chain) {
+    if (exposedId == nodeId) {
+      break;
+    }
+    Status rotated = rotateNode(exposedId, "", "", nullptr, report);
+    if (rotated != Status::Ok) {
+      return rotated;
+    }
+  }
+  return !chain.empty();
+}
+
+Status Client::refreshKeys(const std::string& nodeId, RotationReport& report) {
+  Result<bool> exposed = refreshAncestors(nodeId, report);
+  if (!exposed.ok()) {
+    return exposed.status();
+  }
+  if (!exposed.value()) {
+    return Status::Ok;
+  }
+  return rotateNode(nodeId, "", "", nullptr, report);
+}
+
+Result<bool> Client::writeUnderNewKey(const std::string& nodeId, const ContentChange& change) {
+  RotationReport report;
+  Result<bool> exposed = refreshAncestors(nodeId, report);
+  if (!exposed.ok()) {
+    return exposed.status();
+  }
+  if (!exposed.value() && !isExposedThroughShortcuts(*database_->findNode(nodeId))) {
+    return false;
+  }
+  Status rotated = rotateNode(nodeId, "", "", &change, report);
+  if (rotated != Status::Ok) {
+    return rotated;
+  }
+  return true;
 }
 
 Result<RotationReport> Client::revokeAccess(const std::string& nodeId, const std::string& principalType,
@@ -413,17 +460,19 @@ Result<RotationReport> Client::revokeAccess(const std::string& nodeId, const std
   if (!target.has_value()) {
     return Status::NotFound;
   }
-  Result<RotationReport> report = rotateSubtree(nodeId, principalType, principalId);
-  if (!report.ok()) {
-    return report;
+  RotationReport report;
+  Result<bool> refreshed = refreshAncestors(nodeId, report);
+  if (!refreshed.ok()) {
+    return refreshed.status();
+  }
+  Status rotated = rotateNode(nodeId, principalType, principalId, nullptr, report);
+  if (rotated != Status::Ok) {
+    return rotated;
   }
   AccessGrant revoked = *target;
   revoked.revokedAt = nowText();
   database_->putGrant(revoked);
   queueRevocation(nodeId, principalType, principalId);
-  if (principalType == "user") {
-    revokeUnreferenced(nodeId, principalType, principalId, report.value());
-  }
   return report;
 }
 
@@ -472,9 +521,14 @@ Result<RotationReport> Client::revokeLink(const std::string& linkId) {
   if (linkedNode == nullptr || !canManageAccess(*linkedNode)) {
     return Status::Forbidden;
   }
-  Result<RotationReport> report = rotateSubtree(nodeId, "", "");
-  if (!report.ok()) {
-    return report;
+  RotationReport report;
+  Result<bool> refreshed = refreshAncestors(nodeId, report);
+  if (!refreshed.ok()) {
+    return refreshed.status();
+  }
+  Status rotated = rotateNode(nodeId, "", "", nullptr, report);
+  if (rotated != Status::Ok) {
+    return rotated;
   }
   Json operation = Json::object();
   operation["op"] = "link-revoke";
