@@ -12,6 +12,27 @@ std::string shadowKey(const Node& node) { return node.id + "/" + std::to_string(
 
 Bytes encodeJson(const Json& json) { return bytesOf(dumpCompact(json)); }
 
+using IdIndex = std::map<std::string, std::set<std::string>>;
+
+void removeFromIndex(IdIndex& index, const std::string& key, const std::string& id) {
+  auto found = index.find(key);
+  if (found == index.end()) {
+    return;
+  }
+  found->second.erase(id);
+  if (found->second.empty()) {
+    index.erase(found);
+  }
+}
+
+std::vector<std::string> idsUnder(const IdIndex& index, const std::string& key) {
+  auto found = index.find(key);
+  if (found == index.end()) {
+    return {};
+  }
+  return std::vector<std::string>(found->second.begin(), found->second.end());
+}
+
 std::optional<Json> decodeJson(const Bytes& plaintext) {
   return parseJson(std::string_view(reinterpret_cast<const char*>(plaintext.data()), plaintext.size()));
 }
@@ -110,8 +131,7 @@ void LocalDatabase::loadNode(const Bytes& plaintext) {
   local.dirty = readBool(*json, "dirty").value_or(false);
   local.rejected = readBool(*json, "rejected").value_or(false);
   local.revision = readUnsigned(*json, "revision").value_or(0);
-  std::string id = local.node.id;
-  nodes_[id] = std::move(local);
+  storeLocalNode(std::move(local));
 }
 
 void LocalDatabase::loadGrant(const Bytes& plaintext) {
@@ -245,16 +265,58 @@ Status LocalDatabase::persistLocalNode(const LocalNode& local) {
   return store_->put("node", local.node.id, encodeJson(localNodeToJson(local)));
 }
 
+// Replaces the node's stored version in memory and in the indexes, without persisting it.
+void LocalDatabase::storeLocalNode(LocalNode local) {
+  std::string nodeId = local.node.id;
+  auto existing = nodes_.find(nodeId);
+  if (existing != nodes_.end()) {
+    unindexNode(existing->second);
+  }
+  indexNode(local);
+  nodes_[nodeId] = std::move(local);
+}
+
+void LocalDatabase::indexNode(const LocalNode& local) {
+  const Node& node = local.node;
+  if (node.parentId.has_value()) {
+    childrenByParent_[*node.parentId].insert(node.id);
+  }
+  if (node.targetId.has_value()) {
+    shortcutsByTarget_[*node.targetId].insert(node.id);
+  }
+  nodesByCollection_[node.collection].insert(node.id);
+  if (local.dirty) {
+    dirtyNodeIds_.insert(node.id);
+  }
+}
+
+void LocalDatabase::unindexNode(const LocalNode& local) {
+  const Node& node = local.node;
+  if (node.parentId.has_value()) {
+    removeFromIndex(childrenByParent_, *node.parentId, node.id);
+  }
+  if (node.targetId.has_value()) {
+    removeFromIndex(shortcutsByTarget_, *node.targetId, node.id);
+  }
+  removeFromIndex(nodesByCollection_, node.collection, node.id);
+  dirtyNodeIds_.erase(node.id);
+}
+
 Status LocalDatabase::putNode(Node node, bool dirty) {
-  LocalNode& local = nodes_[node.id];
+  LocalNode local;
+  const LocalNode* existing = findLocal(node.id);
+  if (existing != nullptr) {
+    local.revision = existing->revision;
+  }
   local.node = std::move(node);
   local.dirty = dirty;
-  local.rejected = false;
   if (dirty) {
     local.revision += 1;
   }
-  Status persisted = persistLocalNode(local);
-  notifyNodeChanged(local.node.id);
+  std::string nodeId = local.node.id;
+  storeLocalNode(std::move(local));
+  Status persisted = persistLocalNode(nodes_.at(nodeId));
+  notifyNodeChanged(nodeId);
   return persisted;
 }
 
@@ -276,6 +338,7 @@ Status LocalDatabase::markPushed(const std::string& nodeId, uint64_t seq, uint64
   local.rejected = false;
   if (local.revision == pushedRevision) {
     local.dirty = false;
+    dirtyNodeIds_.erase(nodeId);
   }
   return persistLocalNode(local);
 }
@@ -287,34 +350,27 @@ Status LocalDatabase::markRejected(const std::string& nodeId) {
   }
   found->second.rejected = true;
   found->second.dirty = false;
+  dirtyNodeIds_.erase(nodeId);
   return persistLocalNode(found->second);
 }
 
 Status LocalDatabase::removeNode(const std::string& nodeId) {
-  nodes_.erase(nodeId);
+  auto found = nodes_.find(nodeId);
+  if (found != nodes_.end()) {
+    unindexNode(found->second);
+    nodes_.erase(found);
+  }
   Status removed = store_->remove("node", nodeId);
   notifyNodeChanged(nodeId);
   return removed;
 }
 
 std::vector<std::string> LocalDatabase::childrenOf(const std::string& parentId) const {
-  std::vector<std::string> children;
-  for (const auto& [id, local] : nodes_) {
-    if (local.node.parentId.has_value() && *local.node.parentId == parentId) {
-      children.push_back(id);
-    }
-  }
-  return children;
+  return idsUnder(childrenByParent_, parentId);
 }
 
 std::vector<std::string> LocalDatabase::shortcutsTo(const std::string& targetId) const {
-  std::vector<std::string> shortcuts;
-  for (const auto& [id, local] : nodes_) {
-    if (local.node.targetId.has_value() && *local.node.targetId == targetId) {
-      shortcuts.push_back(id);
-    }
-  }
-  return shortcuts;
+  return idsUnder(shortcutsByTarget_, targetId);
 }
 
 namespace {
@@ -336,23 +392,11 @@ Status LocalDatabase::acceptDescriptor(const std::string& collection, const std:
 }
 
 std::vector<std::string> LocalDatabase::nodesInCollection(const std::string& collection) const {
-  std::vector<std::string> ids;
-  for (const auto& [id, local] : nodes_) {
-    if (local.node.collection == collection) {
-      ids.push_back(id);
-    }
-  }
-  return ids;
+  return idsUnder(nodesByCollection_, collection);
 }
 
 std::vector<std::string> LocalDatabase::dirtyNodeIds() const {
-  std::vector<std::string> ids;
-  for (const auto& [id, local] : nodes_) {
-    if (local.dirty) {
-      ids.push_back(id);
-    }
-  }
-  return ids;
+  return std::vector<std::string>(dirtyNodeIds_.begin(), dirtyNodeIds_.end());
 }
 
 std::vector<std::string> LocalDatabase::allNodeIds() const {
@@ -374,10 +418,9 @@ Status LocalDatabase::putGrant(const AccessGrant& grant) {
 
 std::vector<AccessGrant> LocalDatabase::grantsForNode(const std::string& nodeId) const {
   std::vector<AccessGrant> result;
-  for (const auto& [key, grant] : grants_) {
-    if (grant.nodeId == nodeId) {
-      result.push_back(grant);
-    }
+  for (auto entry = grants_.lower_bound(nodeId + "/"); entry != grants_.end() && entry->second.nodeId == nodeId;
+       ++entry) {
+    result.push_back(entry->second);
   }
   return result;
 }
@@ -593,6 +636,10 @@ std::vector<Node> LocalDatabase::shadowsOf(const std::string& nodeId) const {
 Status LocalDatabase::wipe() {
   std::vector<std::string> removedNodeIds = allNodeIds();
   nodes_.clear();
+  childrenByParent_.clear();
+  shortcutsByTarget_.clear();
+  nodesByCollection_.clear();
+  dirtyNodeIds_.clear();
   grants_.clear();
   pins_.clear();
   certificates_.clear();

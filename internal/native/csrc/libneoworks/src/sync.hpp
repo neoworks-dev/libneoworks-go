@@ -83,14 +83,14 @@ class SyncSession {
   bool collectDirtyBatch(std::vector<Node>& batch);
   void applyPushResult(const PushResult& result);
   bool lookupStillNeeded(const Client::LookupNeed& need) const;
-  std::optional<Client::LookupNeed> recheckNeeded() const;
+  std::optional<Client::LookupNeed> recheckNeeded();
   std::optional<Client::LookupNeed> nextLookupNeeded();
   void deferCertificate(const Client::LookupNeed& need, const Bytes& certificate, const Bytes& signature);
   void retryDeferredCertificates();
   Status beginFullResync();
   void applyPage();
   void applyGrant(const AccessGrant& grant);
-  void applyNode(Node node);
+  void applyNode(Node node, bool verified);
   void finishFullResync();
   void resolveConflicts();
   bool isBlockedAuthor(const Node& node) const;
@@ -116,6 +116,8 @@ class SyncSession {
   std::vector<AccessGrant> deferredGrants_;
 
   std::optional<PullPage> page_;
+  // Which of the page's nodes already passed their signature check, by position.
+  std::vector<bool> pageVerified_;
   bool pullDone_ = false;
   std::string pullCursor_;
   std::optional<Client::LookupNeed> pendingLookup_;

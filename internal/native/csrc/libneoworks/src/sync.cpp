@@ -426,11 +426,17 @@ bool SyncSession::lookupStillNeeded(const Client::LookupNeed& need) const {
   return client_.database().findCertificate(need.id) == nullptr;
 }
 
-std::optional<Client::LookupNeed> SyncSession::recheckNeeded() const {
-  for (const Node& node : page_->nodes) {
-    bool candidate = node.authorType == "user" && client_.database().findPin(node.authorId) != nullptr &&
-                     recheckedUsers_.count(node.authorId) == 0;
-    if (candidate && client_.verifyRemoteNode(node) == Status::AuthenticationFailed) {
+std::optional<Client::LookupNeed> SyncSession::recheckNeeded() {
+  for (size_t index = 0; index < page_->nodes.size(); ++index) {
+    const Node& node = page_->nodes[index];
+    bool candidate = !pageVerified_[index] && node.authorType == "user" &&
+                     client_.database().findPin(node.authorId) != nullptr && recheckedUsers_.count(node.authorId) == 0;
+    if (!candidate) {
+      continue;
+    }
+    Status verified = client_.verifyRemoteNode(node);
+    pageVerified_[index] = verified == Status::Ok;
+    if (verified == Status::AuthenticationFailed) {
       return Client::LookupNeed{Client::LookupNeed::Kind::Identity, node.authorId, true};
     }
   }
@@ -472,6 +478,7 @@ Status SyncSession::handlePullResponse(const HttpResponse& response) {
     return page.status();
   }
   page_ = page.take();
+  pageVerified_.assign(page_->nodes.size(), false);
   return Status::Ok;
 }
 
@@ -661,8 +668,9 @@ bool SyncSession::isBlockedAuthor(const Node& node) const {
   return stored != nullptr && blockedUsers_.count(stored->certificate.userId) > 0;
 }
 
-void SyncSession::applyNode(Node node) {
-  if (isBlockedAuthor(node) || client_.verifyRemoteNode(node) != Status::Ok) {
+void SyncSession::applyNode(Node node, bool verified) {
+  bool rejected = isBlockedAuthor(node) || (!verified && client_.verifyRemoteNode(node) != Status::Ok);
+  if (rejected) {
     ++report_.unverifiableNodes;
     return;
   }
@@ -720,9 +728,9 @@ void SyncSession::applyPage() {
   page_.reset();
   report_.pulledNodes += page.nodes.size();
   report_.malformedEntries += page.malformedEntries;
-  for (Node& node : page.nodes) {
-    seenDuringResync_.insert(node.id);
-    applyNode(std::move(node));
+  for (size_t index = 0; index < page.nodes.size(); ++index) {
+    seenDuringResync_.insert(page.nodes[index].id);
+    applyNode(std::move(page.nodes[index]), pageVerified_[index]);
   }
   applyAccessLog(page.accessLog);
   for (const AccessGrant& grant : page.grants) {

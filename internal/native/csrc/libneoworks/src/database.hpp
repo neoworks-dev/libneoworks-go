@@ -136,6 +136,9 @@ class LocalDatabase {
   explicit LocalDatabase(std::unique_ptr<EncryptedRecordStore> store) : store_(std::move(store)) {}
 
   Status persistLocalNode(const LocalNode& local);
+  void storeLocalNode(LocalNode local);
+  void indexNode(const LocalNode& local);
+  void unindexNode(const LocalNode& local);
   void notifyNodeChanged(const std::string& nodeId) const;
   void load(std::string_view kind, std::string_view key, const Bytes& plaintext);
   void loadNode(const Bytes& plaintext);
@@ -151,6 +154,13 @@ class LocalDatabase {
 
   std::unique_ptr<EncryptedRecordStore> store_;
   std::map<std::string, LocalNode> nodes_;
+  // Node ids by parent id, by shortcut target id and by collection, and the dirty ones, kept in
+  // step with nodes_ by indexNode and unindexNode.
+  std::map<std::string, std::set<std::string>> childrenByParent_;
+  std::map<std::string, std::set<std::string>> shortcutsByTarget_;
+  std::map<std::string, std::set<std::string>> nodesByCollection_;
+  std::set<std::string> dirtyNodeIds_;
+  // By "<nodeId>/<principalType>/<principalId>", so a node's grants are one key range.
   std::map<std::string, AccessGrant> grants_;
   std::map<std::string, PinnedIdentity> pins_;
   std::map<std::string, StoredCertificate> certificates_;
