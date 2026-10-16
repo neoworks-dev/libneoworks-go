@@ -177,8 +177,8 @@ class Client {
   // Sharing: the owner, or an install holding `<collection>:share` for the owner. Grants and
   // revocations are queued as intents and signed into the access log when sent.
   Result<AccessGrant> shareNode(const ShareRequest& request);
-  // Removes the principal's grant, then rotates the node key (and every
-  // descendant key) so the removed principal cannot read later writes.
+  // Removes the principal's grant and gives the node a new key, so the removed principal cannot read
+  // later writes. Records below it move to a new key at their own next write.
   Result<RotationReport> revokeAccess(const std::string& nodeId, const std::string& principalType,
                                       const std::string& principalId);
   // Link shares: the fragment key is base64url(u32be epoch || node key).
@@ -288,52 +288,39 @@ class Client {
   Result<std::string> grantCertificateFor(const std::string& principalType, const std::string& principalId) const;
   std::string nextOutboxId();
   struct RotationStep;
-  Result<RotationReport> rotateSubtree(const std::string& nodeId, const std::string& removedType,
-                                       const std::string& removedId);
+  struct ContentChange {
+    FacetMap plaintexts;
+    std::vector<NodeFile> files;
+  };
   Result<RotationStep> planNodeRotation(const Node& node, const std::string& removedType,
                                         const std::string& removedId);
-  Status rekeyShortcuts(const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                        const std::string& removedType, const std::string& removedId, RotationReport& report);
-  Status rekeyShortcut(const std::string& shortcutId, const std::pair<SymmetricKey, uint32_t>& targetKey,
-                       const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                       const std::string& removedType, const std::string& removedId);
-  Result<std::vector<RotationStep>> planRotation(const std::string& nodeId, const std::string& removedType,
-                                                 const std::string& removedId);
+  Status applyRotationStep(RotationStep& step, const SymmetricKey* newParentKey, uint32_t newParentEpoch);
+  Status reissueGrant(const AccessGrant& old, const Bytes& encPub, uint32_t epoch, const SymmetricKey& nodeKey);
+  // `change`, when set, replaces the content sealed under the new key.
+  Status rotateNode(const std::string& nodeId, const std::string& removedType, const std::string& removedId,
+                    const ContentChange* change, RotationReport& report);
+  Status rekeyShortcuts(const std::string& targetId, const SymmetricKey& targetKey, uint32_t targetEpoch,
+                        RotationReport& report);
+  Status rekeyShortcut(const std::string& shortcutId, const SymmetricKey& targetKey, uint32_t targetEpoch);
+  Status currentParentKey(const Node& node, SymmetricKey& parentKey, uint32_t& parentEpoch);
+  // Stale: wrapped under an earlier key of its parent. Unknown: no parent, or one whose key this
+  // holder lacks.
+  enum class Wrapping { Current, Stale, Unknown };
+  Wrapping wrappingOf(const Node& node);
+  // From the topmost stale node among `nodeId` and its ancestors down to `nodeId`, whose keys a removed
+  // principal may hold; empty when none is stale.
+  std::vector<std::string> exposedChainOf(const std::string& nodeId);
+  // Whether a shortcut to the item sits under a stale node, so a removed principal may hold its key.
+  bool isExposedThroughShortcuts(const Node& node);
+  // Rotates the exposed ancestors of `nodeId` top down; true when `nodeId` itself is exposed.
+  Result<bool> refreshAncestors(const std::string& nodeId, RotationReport& report);
+  // Rotates `nodeId` and its ancestors where exposed, before something new is wrapped under it.
+  Status refreshKeys(const std::string& nodeId, RotationReport& report);
+  // Writes `change` to an exposed node under a new key; false when the node is not exposed.
+  Result<bool> writeUnderNewKey(const std::string& nodeId, const ContentChange& change);
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
   // Writes and queues the grant described by `request`; the caller checked the right to share.
   Result<AccessGrant> grantNode(const ShareRequest& request);
-  // Sharing follows references (client_references.cpp).
-  struct ReferenceWalk;
-  using FacetTags = std::optional<std::vector<uint32_t>>;
-  // The nodes outside the subtree of `startId` that its content refers to, directly or through
-  // other referenced nodes and shortcuts, in discovery order. `facets` limits the references of
-  // the starting subtree to fields in those facets. References to nodes that are not here or are
-  // deleted are left out.
-  std::vector<std::string> referencedNodesOf(const std::string& startId, const FacetTags& facets) const;
-  void walkSubtree(ReferenceWalk& walk, const std::string& rootId, const FacetTags& facets) const;
-  void walkNode(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
-  void walkReferences(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
-  void walkReference(ReferenceWalk& walk, const std::string& nodeId) const;
-  bool isWithin(const std::string& nodeId, const std::string& ancestorId) const;
-  // Refuses with the node as `lastContentError` path and "referenced_node_not_shareable" when this holder
-  // cannot hand out one of the nodes.
-  Status requireShareable(const std::vector<std::string>& nodeIds);
-  bool principalHasAccess(const Node& node, const std::string& principalType, const std::string& principalId) const;
-  bool hasActiveGrant(const std::string& nodeId, const std::string& principalType,
-                      const std::string& principalId) const;
-  bool isReferencedForPrincipal(const std::string& nodeId, const std::string& principalType,
-                                const std::string& principalId) const;
-  Status grantReferenced(const std::string& nodeId, const ShareRequest& share);
-  // Gives the people a node is shared with read access to what it refers to, where this holder
-  // may share that. What it may not share is left out; the write itself never fails for it.
-  void grantReferencesToHolders(const std::string& nodeId);
-  std::vector<std::string> peopleWithAccessTo(const Node& node) const;
-  void revokeUnreferenced(const std::string& startId, const std::string& principalType,
-                          const std::string& principalId, RotationReport& report);
-  Status parentForStep(const RotationStep& step,
-                       const std::map<std::string, std::pair<SymmetricKey, uint32_t>>& rotated,
-                       SymmetricKey& parentKey, uint32_t& parentEpoch);
-  Status applyRotationStep(RotationStep& step, const SymmetricKey* newParentKey, uint32_t newParentEpoch);
   Status queueRevocation(const std::string& nodeId, const std::string& principalType, const std::string& principalId);
   int rankOnNode(const Node& node) const;
   int inheritedRank(const Node& node) const;

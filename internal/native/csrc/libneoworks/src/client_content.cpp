@@ -168,6 +168,11 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
   node.ownerId = signer_.authorId;
   SymmetricKey nodeKey = SymmetricKey::random();
   if (!isRoot) {
+    RotationReport refreshed;
+    Status fresh = refreshKeys(*request.parentId, refreshed);
+    if (fresh != Status::Ok) {
+      return fresh;
+    }
     Status attached = attachToParent(node, nodeKey);
     if (attached != Status::Ok) {
       return attached;
@@ -195,7 +200,6 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
       return granted;
     }
   }
-  grantReferencesToHolders(node.id);
   return node.id;
 }
 
@@ -223,6 +227,11 @@ Result<std::string> Client::createShortcut(const CreateShortcutRequest& request)
   node.targetRole = request.targetRole;
   node.createdAt = nowText();
   node.updatedAt = node.createdAt;
+  RotationReport refreshed;
+  Status fresh = refreshKeys(request.parentId, refreshed);
+  if (fresh != Status::Ok) {
+    return fresh;
+  }
   Status attached = attachToParent(node, targetKey.value());
   if (attached != Status::Ok) {
     return attached;
@@ -232,7 +241,6 @@ Result<std::string> Client::createShortcut(const CreateShortcutRequest& request)
     return stored;
   }
   keyring_.addNodeKey(node.id, node.epoch, targetKey.value().clone());
-  grantReferencesToHolders(node.id);
   return node.id;
 }
 
@@ -282,12 +290,12 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
     }
     node.files = files.take();
   }
-  sealContent(node, nodeKey.value(), plaintexts);
-  Status stored = signAndStore(node);
-  if (stored == Status::Ok) {
-    grantReferencesToHolders(node.id);
+  Result<bool> rotated = writeUnderNewKey(node.id, ContentChange{plaintexts, node.files});
+  if (!rotated.ok() || rotated.value()) {
+    return rotated.status();
   }
-  return stored;
+  sealContent(node, nodeKey.value(), plaintexts);
+  return signAndStore(node);
 }
 
 Status Client::deleteNode(const std::string& nodeId, bool recursive) {

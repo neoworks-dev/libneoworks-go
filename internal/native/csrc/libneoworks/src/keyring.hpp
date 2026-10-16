@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "grant.hpp"
+#include "key_history.hpp"
 #include "node.hpp"
 
 namespace nw {
@@ -44,6 +45,8 @@ class Keyring {
  private:
   Result<SymmetricKey> resolveWithDepth(const Node& node, const NodeLookup& lookup, int depth);
   Result<SymmetricKey> unwrapUnderParent(const Node& node, const Node& parent, const NodeLookup& lookup, int depth);
+  Result<SymmetricKey> unwrapWithKnownKeys(const Node& node, const std::string& parentId) const;
+  void addPreviousKeys(const Node& node, const SymmetricKey& nodeKey);
   Result<SymmetricKey> unwrapThroughParent(const Node& node, const NodeLookup& lookup, int depth);
   Result<SymmetricKey> resolveThroughShortcuts(const Node& node, const NodeLookup& lookup, int depth);
 
