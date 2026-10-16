@@ -23,10 +23,10 @@ struct CreateNodeRequest {
   std::optional<std::string> parentId;
   std::string collection;
   std::string kind;
-  // A JSON object of the collection's model for `kind`. Roots carry no content.
+  // A JSON object of the collection's model for `kind`. Roots carry no content. The `File` values
+  // in it name the storage objects the app uploads once the node is pushed; the core lists them
+  // on the node.
   Json content = Json::object();
-  // An item created with a file is an asset; every other node is created without one.
-  std::optional<BlobDescriptor> blob;
 };
 
 // An item under `parentId` that opens `targetId`, an item of the same collection, for
@@ -42,8 +42,6 @@ struct UpdateNodeRequest {
   // The top-level fields to change. A given field replaces the stored value, null clears it,
   // and fields not given keep their value.
   Json changes = Json::object();
-  // Replaces an asset's file. InvalidArgument for a node that is not an asset.
-  std::optional<BlobDescriptor> blob;
 };
 
 enum class PinState { New, Match, Changed };
@@ -60,9 +58,6 @@ struct ShareRequest {
 
 struct RotationReport {
   std::vector<std::string> rotatedNodeIds;
-  // Blob chunks stay encrypted under the previous epoch's key; the app must
-  // re-encrypt and re-upload them for the new key chain.
-  std::vector<std::string> blobReencryptionRequired;
 };
 
 struct LinkRecord {
@@ -151,6 +146,10 @@ class Client {
   // decrypt. A version whose author cannot be checked offline is unverified.
   Result<VersionRead> readVersion(const Json& version);
   Result<SymmetricKey> resolveNodeKey(const std::string& nodeId);
+  // The key of the file that has the object `objectId` among its original and variants, read from
+  // the File value in the fields of the node this client can open. NotFound: no such object in
+  // those fields.
+  Result<SymmetricKey> resolveFileKey(const std::string& nodeId, const std::string& objectId);
   NodeLookup nodeLookup() const;
 
   // Role this principal holds on the node: own grants on the node or an ancestor, and
@@ -265,9 +264,19 @@ class Client {
   Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   // The node descriptor for content of `kind` in `collection`; records the reason on failure.
   Result<const NodeDescriptor*> nodeDescriptorFor(const std::string& collection, const std::string& kind);
+  // The content as an app sees it: Files without their keys.
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
+  // The content as stored, Files with their keys.
+  Result<Json> readStoredContent(const Node& node, const SymmetricKey* nodeKey);
   // The facet plaintexts of a node to create; roots have none.
   Result<FacetMap> encodeNewContent(const CreateNodeRequest& request);
+  // `changes` with a key in every File value: the stored one when `stored` holds the File, else a
+  // new one.
+  Result<Json> withFileKeys(const NodeDescriptor& descriptor, const Json& changes, const FacetMap& stored);
+  // The plain file list for facets about to be sealed into a node of `kind`; empty for nodes
+  // without content.
+  Result<std::vector<NodeFile>> filesOfContent(const std::string& collection, const std::string& kind,
+                                               const FacetMap& plaintexts);
   Status signAndStore(Node& node);
   Status createOwnerGrant(const Node& root, const SymmetricKey& nodeKey);
   Status queueGrant(const AccessGrant& grant);
@@ -306,7 +315,7 @@ class Client {
   void walkReferences(ReferenceWalk& walk, const Node& node, const FacetTags& facets) const;
   void walkReference(ReferenceWalk& walk, const std::string& nodeId) const;
   bool isWithin(const std::string& nodeId, const std::string& ancestorId) const;
-  // Refuses with the node as `lastContentError` path and "asset_not_shareable" when this holder
+  // Refuses with the node as `lastContentError` path and "referenced_node_not_shareable" when this holder
   // cannot hand out one of the nodes.
   Status requireShareable(const std::vector<std::string>& nodeIds);
   bool principalHasAccess(const Node& node, const std::string& principalType, const std::string& principalId) const;

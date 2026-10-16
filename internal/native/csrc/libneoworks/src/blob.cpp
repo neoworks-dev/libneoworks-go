@@ -17,11 +17,19 @@ HttpRequest apiJsonRequest(const std::string& url, const Bytes& body) {
 
 bool isSuccess(int httpStatus) { return httpStatus >= 200 && httpStatus < 300; }
 
+const NodeFile* findListedFile(const Node& node, const std::string& objectId) {
+  for (const NodeFile& file : node.files) {
+    if (file.objectId == objectId) {
+      return &file;
+    }
+  }
+  return nullptr;
+}
+
 }  // namespace
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, const std::string& nodeId,
-                                                                uint32_t variantIndex, const std::string& objectId,
-                                                                uint64_t totalSize) {
+                                                                const std::string& objectId) {
   if (!isLowercaseUuid(objectId)) {
     return Status::InvalidArgument;
   }
@@ -32,63 +40,72 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
   if (node == nullptr || isShortcut(*node)) {
     return Status::InvalidArgument;
   }
-  Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
+  }
+  Result<SymmetricKey> fileKey = client.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Upload;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
-  transfer->totalSize_ = totalSize;
-  transfer->chunkCount_ = static_cast<uint32_t>(blobChunkCount(totalSize));
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
+  transfer->totalSize_ = file->size;
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginDownload(Client& client, const std::string& nodeId,
-                                                                  uint32_t variantIndex, const std::string& objectId,
-                                                                  uint32_t chunkCount) {
+                                                                  const std::string& objectId) {
   const Node* node = client.database().findNode(nodeId);
-  if (node == nullptr || isShortcut(*node) || !isLowercaseUuid(objectId) || chunkCount == 0) {
+  if (node == nullptr || isShortcut(*node) || !isLowercaseUuid(objectId)) {
     return Status::InvalidArgument;
   }
-  Result<SymmetricKey> nodeKey = client.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
+  }
+  Result<SymmetricKey> fileKey = client.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Download;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
-  for (auto& [epoch, key] : client.keyring().allNodeKeys(nodeId)) {
-    if (epoch != node->epoch) {
-      transfer->candidateKeys_.push_back(blobKey(key, variantIndex));
-    }
-  }
-  transfer->chunkCount_ = chunkCount;
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginLinkDownload(LinkReader& reader, const std::string& linkId,
-                                                                      const std::string& nodeId, uint32_t variantIndex,
-                                                                      const std::string& objectId,
-                                                                      uint32_t chunkCount) {
-  if (!isLowercaseUuid(objectId) || !isLowercaseUuid(linkId) || chunkCount == 0) {
+                                                                      const std::string& nodeId,
+                                                                      const std::string& objectId) {
+  if (!isLowercaseUuid(objectId) || !isLowercaseUuid(linkId)) {
     return Status::InvalidArgument;
   }
-  Result<SymmetricKey> nodeKey = reader.resolveNodeKey(nodeId);
-  if (!nodeKey.ok()) {
-    return nodeKey.status();
+  const Node* node = reader.findNode(nodeId);
+  if (node == nullptr) {
+    return Status::NotFound;
+  }
+  const NodeFile* file = findListedFile(*node, objectId);
+  if (file == nullptr) {
+    return Status::NotFound;
+  }
+  Result<SymmetricKey> fileKey = reader.resolveFileKey(nodeId, objectId);
+  if (!fileKey.ok()) {
+    return fileKey.status();
   }
   std::unique_ptr<BlobTransfer> transfer(new BlobTransfer());
   transfer->mode_ = Mode::Download;
   transfer->nodeId_ = nodeId;
   transfer->objectId_ = objectId;
   transfer->presignPath_ = "/api/v1/links/" + linkId + "/presign";
-  transfer->candidateKeys_.push_back(blobKey(nodeKey.value(), variantIndex));
-  transfer->chunkCount_ = chunkCount;
+  transfer->objectKey_ = objectKey(fileKey.value(), objectId);
+  transfer->chunkCount_ = file->chunks;
   return transfer;
 }
 
@@ -167,7 +184,7 @@ Status BlobTransfer::provideChunk(ByteView plaintext) {
   request_.url = urlFor(chunkIndex_);
   request_.isApi = false;
   request_.contentType = "application/octet-stream";
-  request_.body = encryptBlobChunk(candidateKeys_[0], nodeId_, objectId_, chunkIndex_, finalChunk, plaintext);
+  request_.body = encryptBlobChunk(objectKey_, objectId_, chunkIndex_, finalChunk, plaintext);
   awaiting_ = Awaiting::ChunkTransfer;
   state_ = State::RequestReady;
   return Status::Ok;
@@ -204,16 +221,14 @@ Status BlobTransfer::handleChunkDownload(const HttpResponse& response) {
     return fail(Status::IoFailure);
   }
   bool finalChunk = isFinalChunk(chunkIndex_);
-  for (const SymmetricKey& key : candidateKeys_) {
-    Result<Bytes> plaintext = decryptBlobChunk(key, nodeId_, objectId_, chunkIndex_, finalChunk, response.body);
-    if (plaintext.ok()) {
-      pendingPlaintext_ = plaintext.take();
-      awaiting_ = Awaiting::Nothing;
-      state_ = State::ChunkReady;
-      return Status::Ok;
-    }
+  Result<Bytes> plaintext = decryptBlobChunk(objectKey_, objectId_, chunkIndex_, finalChunk, response.body);
+  if (!plaintext.ok()) {
+    return fail(Status::AuthenticationFailed);
   }
-  return fail(Status::AuthenticationFailed);
+  pendingPlaintext_ = plaintext.take();
+  awaiting_ = Awaiting::Nothing;
+  state_ = State::ChunkReady;
+  return Status::Ok;
 }
 
 Status BlobTransfer::handleResponse(const HttpResponse& response) {

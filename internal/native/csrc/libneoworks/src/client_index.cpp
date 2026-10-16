@@ -8,13 +8,24 @@ namespace {
 
 constexpr int kMaxAncestorWalk = 64;
 
-void collectSearchTexts(const Json& value, std::vector<std::string>& texts) {
+// A string is indexed as it is, a File by its name.
+void addSearchText(const Json& value, std::vector<std::string>& texts) {
   if (value.is_string()) {
     texts.push_back(lowercaseAscii(value.get<std::string>()));
     return;
   }
+  if (value.is_object() && value.contains("name") && value.at("name").is_string()) {
+    texts.push_back(lowercaseAscii(value.at("name").get<std::string>()));
+  }
+}
+
+void collectSearchTexts(const Json& value, std::vector<std::string>& texts) {
+  if (!value.is_array()) {
+    addSearchText(value, texts);
+    return;
+  }
   for (const Json& element : value) {
-    texts.push_back(lowercaseAscii(element.get<std::string>()));
+    addSearchText(element, texts);
   }
 }
 
@@ -33,7 +44,6 @@ std::vector<std::string> searchTextsOf(const NodeDescriptor& descriptor, const J
 IndexedNode indexedNodeOf(const Node& node, const NodeDescriptor& descriptor, const Json& content) {
   IndexedNode entry;
   entry.kind = node.kind;
-  entry.model = descriptor.kind;
   entry.parentId = node.parentId;
   entry.values = fieldValuesOf(*descriptor.model, content);
   entry.searchTexts = searchTextsOf(descriptor, content);
@@ -135,7 +145,7 @@ Result<IndexedNode> Client::indexEntryFor(const Node& node) {
   const SchemaDescriptor* schema = descriptorFor(node.collection);
   const NodeDescriptor* descriptor = nullptr;
   if (schema != nullptr) {
-    descriptor = schema->nodeByKind(contentKindOf(node));
+    descriptor = schema->nodeByKind(node.kind);
   }
   if (descriptor == nullptr) {
     return Status::InvalidState;
@@ -165,7 +175,7 @@ void Client::indexNode(const std::string& nodeId) {
     return;
   }
   index_.erase(nodeId);
-  if (entry.status() == Status::Forbidden) {
+  if (entry.status() == Status::Forbidden || entry.status() == Status::IntegrityFailure) {
     unindexedNodeIds_.erase(nodeId);
     return;
   }

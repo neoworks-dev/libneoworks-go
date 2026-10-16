@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "files.hpp"
 #include "node_content.hpp"
 #include "tlv.hpp"
 
@@ -124,6 +125,35 @@ Status LinkReader::setDescriptor(const std::string& collection, std::string_view
   return Status::Ok;
 }
 
+Result<Json> LinkReader::readStoredContent(const Node& node, const NodeDescriptor& descriptor) {
+  NodeLookup lookup = [this](const std::string& id) { return findNode(id); };
+  Result<FacetMap> readable = readableFacets(
+      node, descriptor, [&](uint32_t tag) { return keyring_.resolveFacetKey(node, tag, lookup); });
+  if (!readable.ok()) {
+    return readable.status();
+  }
+  if (readable.value().empty()) {
+    return Status::NotFound;
+  }
+  CodecError error;
+  Result<Json> content = decodeContent(descriptor, readable.value(), error);
+  if (!content.ok()) {
+    return content.status();
+  }
+  if (checkNodeFiles(descriptor, node, content.value()) != Status::Ok) {
+    return Status::IntegrityFailure;
+  }
+  return content;
+}
+
+const NodeDescriptor* LinkReader::descriptorOf(const Node& node) const {
+  auto schema = descriptors_.find(node.collection);
+  if (schema == descriptors_.end()) {
+    return nullptr;
+  }
+  return schema->second->nodeByKind(node.kind);
+}
+
 Result<Json> LinkReader::readNode(const std::string& nodeId) {
   const Node* node = findNode(nodeId);
   if (node == nullptr || node->deleted) {
@@ -132,25 +162,32 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
   if (node->kind == "root" || isShortcut(*node)) {
     return Json::object();
   }
-  auto schema = descriptors_.find(node->collection);
-  const NodeDescriptor* descriptor = nullptr;
-  if (schema != descriptors_.end()) {
-    descriptor = schema->second->nodeByKind(contentKindOf(*node));
-  }
+  const NodeDescriptor* descriptor = descriptorOf(*node);
   if (descriptor == nullptr) {
     return Status::InvalidState;
   }
-  NodeLookup lookup = [this](const std::string& id) { return findNode(id); };
-  Result<FacetMap> readable = readableFacets(
-      *node, *descriptor, [&](uint32_t tag) { return keyring_.resolveFacetKey(*node, tag, lookup); });
-  if (!readable.ok()) {
-    return readable.status();
+  Result<Json> content = readStoredContent(*node, *descriptor);
+  if (!content.ok()) {
+    return content.status();
   }
-  if (readable.value().empty()) {
+  removeFileKeys(*descriptor->model, content.value());
+  return content;
+}
+
+Result<SymmetricKey> LinkReader::resolveFileKey(const std::string& nodeId, const std::string& objectId) {
+  const Node* node = findNode(nodeId);
+  if (node == nullptr || node->deleted || node->kind == "root" || isShortcut(*node)) {
     return Status::NotFound;
   }
-  CodecError error;
-  return decodeContent(*descriptor, readable.value(), error);
+  const NodeDescriptor* descriptor = descriptorOf(*node);
+  if (descriptor == nullptr) {
+    return Status::InvalidState;
+  }
+  Result<Json> content = readStoredContent(*node, *descriptor);
+  if (!content.ok()) {
+    return content.status();
+  }
+  return findFileKey(*descriptor->model, content.value(), objectId);
 }
 
 }  // namespace nw

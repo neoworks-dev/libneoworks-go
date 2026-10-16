@@ -60,6 +60,9 @@ Result<SecretBytes> sealOpen(ByteView publicKey, ByteView secretKey, ByteView se
 // 32-byte subkey; context must be exactly 8 characters.
 SymmetricKey kdf(const SymmetricKey& key, uint64_t subkeyId, std::string_view context);
 
+// BLAKE2b-256 of `input` keyed with `key`.
+SymmetricKey keyedHash(const SymmetricKey& key, ByteView input);
+
 Bytes hash(ByteView message);
 
 struct SignKeypair {

@@ -1,6 +1,7 @@
 #include "node.hpp"
 
 #include <algorithm>
+#include <set>
 
 #include "tlv.hpp"
 #include "wire.hpp"
@@ -10,7 +11,7 @@ namespace nw {
 namespace {
 
 constexpr std::string_view kFacetContext = "nwfacet1";
-constexpr std::string_view kBlobContext = "nwblob01";
+constexpr std::string_view kObjectKeyContext = "nwfile02";
 constexpr std::string_view kKinds[] = {"root", "container", "item"};
 constexpr std::string_view kPrincipalTypes[] = {"user", "install"};
 constexpr std::string_view kTargetRoles[] = {"read", "write"};
@@ -49,15 +50,6 @@ bool isValidKind(std::string_view kind) { return isOneOf(kKinds, kind); }
 bool isValidPrincipalType(std::string_view principalType) { return isOneOf(kPrincipalTypes, principalType); }
 bool isShortcut(const Node& node) { return node.targetId.has_value(); }
 
-std::string contentKindFor(std::string_view kind, bool carriesFile) {
-  if (kind == "item" && carriesFile) {
-    return "asset";
-  }
-  return std::string(kind);
-}
-
-std::string contentKindOf(const Node& node) { return contentKindFor(node.kind, node.blob.has_value()); }
-
 Result<FacetMap> parseContent(ByteView content) {
   FacetMap facets;
   wire::Reader reader(content);
@@ -82,63 +74,54 @@ Bytes assembleContent(const FacetMap& ciphertexts) {
   return writer.take();
 }
 
-Json blobToJson(const BlobDescriptor& blob) {
-  Json json = Json::object();
-  json["objectId"] = blob.objectId;
-  json["chunks"] = blob.chunks;
-  json["size"] = blob.size;
-  Json variants = Json::array();
-  for (const BlobVariant& variant : blob.variants) {
+Json filesToJson(const std::vector<NodeFile>& files) {
+  Json list = Json::array();
+  for (const NodeFile& file : files) {
     Json entry = Json::object();
-    entry["name"] = variant.name;
-    entry["objectId"] = variant.objectId;
-    entry["chunks"] = variant.chunks;
-    entry["size"] = variant.size;
-    variants.push_back(std::move(entry));
+    entry["objectId"] = file.objectId;
+    entry["chunks"] = file.chunks;
+    entry["size"] = file.size;
+    list.push_back(std::move(entry));
   }
-  json["variants"] = std::move(variants);
-  return json;
+  return list;
 }
 
 namespace {
 
-Result<BlobVariant> blobVariantFromJson(const Json& json) {
-  std::optional<std::string> name = readString(json, "name");
+Result<NodeFile> fileFromJson(const Json& json) {
   std::optional<std::string> objectId = readString(json, "objectId");
   std::optional<uint64_t> chunks = readUnsigned(json, "chunks");
   std::optional<uint64_t> size = readUnsigned(json, "size");
-  if (!name || !objectId || !chunks || !size || *chunks > UINT32_MAX || !isLowercaseUuid(*objectId)) {
+  if (!objectId || !chunks || !size || *chunks > UINT32_MAX || !isLowercaseUuid(*objectId)) {
     return Status::Malformed;
   }
-  return BlobVariant{*name, *objectId, static_cast<uint32_t>(*chunks), *size};
+  return NodeFile{*objectId, static_cast<uint32_t>(*chunks), *size};
 }
 
 }  // namespace
 
-Result<BlobDescriptor> blobFromJson(const Json& json) {
-  std::optional<std::string> objectId = readString(json, "objectId");
-  std::optional<uint64_t> chunks = readUnsigned(json, "chunks");
-  std::optional<uint64_t> size = readUnsigned(json, "size");
-  const Json* variantsJson = readArray(json, "variants");
-  if (!objectId || !chunks || !size || variantsJson == nullptr || *chunks > UINT32_MAX ||
-      !isLowercaseUuid(*objectId)) {
+Result<std::vector<NodeFile>> filesFromJson(const Json& json) {
+  if (!json.is_array()) {
     return Status::Malformed;
   }
-  BlobDescriptor blob;
-  blob.objectId = *objectId;
-  blob.chunks = static_cast<uint32_t>(*chunks);
-  blob.size = *size;
-  for (const Json& entry : *variantsJson) {
-    Result<BlobVariant> variant = blobVariantFromJson(entry);
-    if (!variant.ok()) {
-      return variant.status();
+  std::vector<NodeFile> files;
+  std::set<std::string> objectIds;
+  for (const Json& entry : json) {
+    Result<NodeFile> file = fileFromJson(entry);
+    if (!file.ok() || !objectIds.insert(file.value().objectId).second) {
+      return Status::Malformed;
     }
-    blob.variants.push_back(variant.take());
+    files.push_back(file.take());
   }
-  return blob;
+  return files;
 }
 
-Bytes canonicalBlobBytes(const BlobDescriptor& blob) { return bytesOf(dumpCompact(blobToJson(blob))); }
+Bytes canonicalFilesBytes(const std::vector<NodeFile>& files) {
+  if (files.empty()) {
+    return Bytes();
+  }
+  return bytesOf(dumpCompact(filesToJson(files)));
+}
 
 Json nodeToJson(const Node& node) {
   Json json = Json::object();
@@ -156,10 +139,7 @@ Json nodeToJson(const Node& node) {
     json["wrappedKey"] = bytesToJson(*node.wrappedKey);
   }
   json["content"] = toBase64Url(node.content);
-  json["blob"] = Json(nullptr);
-  if (node.blob.has_value()) {
-    json["blob"] = blobToJson(*node.blob);
-  }
+  json["files"] = filesToJson(node.files);
   json["targetId"] = Json(nullptr);
   json["targetRole"] = Json(nullptr);
   if (node.targetId.has_value()) {
@@ -238,13 +218,15 @@ Result<Node> nodeFromJson(const Json& json) {
     return Status::Malformed;
   }
   node.content = std::move(*scalars.content);
-  if (json.contains("blob") && !json.at("blob").is_null()) {
-    Result<BlobDescriptor> blob = blobFromJson(json.at("blob"));
-    if (!blob.ok()) {
-      return blob.status();
-    }
-    node.blob = blob.take();
+  Json filesJson = Json::array();
+  if (json.contains("files")) {
+    filesJson = json.at("files");
   }
+  Result<std::vector<NodeFile>> files = filesFromJson(filesJson);
+  if (!files.ok()) {
+    return files.status();
+  }
+  node.files = files.take();
   node.id = *scalars.id;
   node.ownerId = *scalars.ownerId;
   node.collection = *scalars.collection;
@@ -283,7 +265,7 @@ bool hasValidParentage(const Node& node) {
   return node.parentId.has_value() && node.wrappedKey.has_value();
 }
 
-// Shortcuts are items with no content or blob of their own, pointing at another node.
+// Shortcuts are items with no content or files of their own, pointing at another node.
 bool hasValidShortcut(const Node& node) {
   if (node.targetId.has_value() != node.targetRole.has_value()) {
     return false;
@@ -292,7 +274,7 @@ bool hasValidShortcut(const Node& node) {
     return true;
   }
   return node.kind == "item" && isOneOf(kTargetRoles, *node.targetRole) && *node.targetId != node.id &&
-         node.content.empty() && !node.blob.has_value();
+         node.content.empty() && node.files.empty();
 }
 
 bool hasValidAuthor(const Node& node) {
@@ -331,14 +313,17 @@ Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, u
       .finish();
 }
 
-Bytes blobChunkAad(std::string_view id, std::string_view objectId, uint32_t index, bool finalChunk) {
-  return TlvWriter("nw-blob-chunk-v1").text(id).text(objectId).u32(index).flag(finalChunk).finish();
+Bytes blobChunkAad(std::string_view objectId, uint32_t index, bool finalChunk) {
+  return TlvWriter("nw-blob-chunk-v2").text(objectId).u32(index).flag(finalChunk).finish();
 }
 
 SymmetricKey facetKey(const SymmetricKey& nodeKey, uint32_t tag) { return kdf(nodeKey, tag, kFacetContext); }
 
-SymmetricKey blobKey(const SymmetricKey& nodeKey, uint32_t variantIndex) {
-  return kdf(nodeKey, kBlobKeyIdBase + variantIndex, kBlobContext);
+SymmetricKey objectKey(const SymmetricKey& fileKey, std::string_view objectId) {
+  Bytes input = bytesOf(kObjectKeyContext);
+  Bytes id = bytesOf(objectId);
+  input.insert(input.end(), id.begin(), id.end());
+  return keyedHash(fileKey, input);
 }
 
 Bytes wrapNodeKey(const SymmetricKey& parentKey, const SymmetricKey& nodeKey, std::string_view id,
@@ -407,14 +392,14 @@ size_t blobChunkCount(uint64_t size) {
   return static_cast<size_t>((size + kBlobChunkBytes - 1) / kBlobChunkBytes);
 }
 
-Bytes encryptBlobChunk(const SymmetricKey& blobKeyValue, std::string_view nodeId, std::string_view objectId,
-                       uint32_t index, bool finalChunk, ByteView plaintext) {
-  return aeadEncrypt(blobKeyValue, plaintext, blobChunkAad(nodeId, objectId, index, finalChunk));
+Bytes encryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                       bool finalChunk, ByteView plaintext) {
+  return aeadEncrypt(objectKeyValue, plaintext, blobChunkAad(objectId, index, finalChunk));
 }
 
-Result<Bytes> decryptBlobChunk(const SymmetricKey& blobKeyValue, std::string_view nodeId,
-                               std::string_view objectId, uint32_t index, bool finalChunk, ByteView boxed) {
-  return aeadDecrypt(blobKeyValue, boxed, blobChunkAad(nodeId, objectId, index, finalChunk));
+Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
+                               bool finalChunk, ByteView boxed) {
+  return aeadDecrypt(objectKeyValue, boxed, blobChunkAad(objectId, index, finalChunk));
 }
 
 Bytes nodeWriteMessage(const Node& node) {
@@ -422,11 +407,7 @@ Bytes nodeWriteMessage(const Node& node) {
   if (node.wrappedKey.has_value()) {
     wrappedKeyBytes = *node.wrappedKey;
   }
-  Bytes blobBytes;
-  if (node.blob.has_value()) {
-    blobBytes = canonicalBlobBytes(*node.blob);
-  }
-  return TlvWriter("nw-node-write-v2")
+  return TlvWriter("nw-node-write-v3")
       .text(node.id)
       .optionalText(node.parentId)
       .text(node.collection)
@@ -438,7 +419,7 @@ Bytes nodeWriteMessage(const Node& node) {
       .optionalText(node.targetRole)
       .bytes(hash(wrappedKeyBytes))
       .bytes(hash(node.content))
-      .bytes(hash(blobBytes))
+      .bytes(hash(canonicalFilesBytes(node.files)))
       .finish();
 }
 

@@ -36,7 +36,8 @@ enum class Scalar {
   Duration,
 };
 
-enum class ValueKind { Scalar, Enum, Message, Decimal, Oneof };
+// File is the built-in file type: it is encoded and decoded as the message `fileModel()`.
+enum class ValueKind { Scalar, Enum, Message, Decimal, Oneof, File };
 
 struct EnumDescriptor;
 struct ModelDescriptor;
@@ -45,7 +46,7 @@ struct OneofVariantDescriptor;
 struct ValueShape {
   ValueKind kind = ValueKind::Scalar;
   Scalar scalar = Scalar::Bool;
-  // Enum or model name, resolved into enumType / model after parsing.
+  // Enum or model name, resolved into enumType / model after parsing. A File has `fileModel()`.
   std::string name;
   const EnumDescriptor* enumType = nullptr;
   const ModelDescriptor* model = nullptr;
@@ -122,7 +123,8 @@ struct TimeRangeDescriptor {
   uint32_t end = 0;
 };
 
-// kind is "container", "item" or "asset". An asset is an item that carries exactly one file.
+// kind is "container" or "item". `searchable` and `title` name string or File fields; a File is
+// indexed by its name.
 struct NodeDescriptor {
   std::string kind;
   std::string modelName;
@@ -147,6 +149,11 @@ struct SchemaDescriptor {
   const EnumDescriptor* enumByName(std::string_view enumName) const;
   const NodeDescriptor* nodeByKind(std::string_view kind) const;
 };
+
+// The message a File value is: {objectId: uuid, name: string, mediaType: string, size: u64,
+// variants: {string: FileVariant}, key: 32 bytes} with the ordinals 1 to 6, and FileVariant
+// {objectId, size}. The key encrypts the file's objects and never leaves the core.
+const ModelDescriptor& fileModel();
 
 constexpr uint32_t kDescriptorVersion = 1;
 constexpr uint32_t kDefaultFacetTag = 1;

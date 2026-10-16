@@ -190,27 +190,23 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 	}
 }
 
-func TestQueryOverAssetsNeedsAnAssetModel(t *testing.T) {
-	client := newTestClient(t)
-	collection := "@neoworks/calendar"
-	descriptor := readDescriptor(t)
-	if _, err := client.RegisterDescriptor(collection, descriptor); err != nil {
-		t.Fatal(err)
-	}
-	if err := client.CompleteDescriptorCheck(collection, 200, descriptor); err != nil {
-		t.Fatal(err)
-	}
+const fileDescriptor = `{"descriptorVersion":1,"namespace":"neoworks.photos","enums":[],"models":[{"name":"Photo","fields":[
+{"ordinal":1,"name":"image","container":{"kind":"singular","nullable":false},"value":{"kind":"file"},"required":true,"constraints":{}},
+{"ordinal":2,"name":"attachments","container":{"kind":"repeatedLen"},"value":{"kind":"file"},"required":false,"constraints":{}}]}],
+"nodes":[{"kind":"item","model":"Photo","facets":[{"name":"default","tag":1,"fields":[1,2]}],"searchable":[2],"title":1,"timeRange":null}]}`
 
-	var contentError *ContentError
-	_, err := client.Query(collection, Query{Model: "asset"})
-	if !errors.As(err, &contentError) || !errors.Is(err, StatusInvalidArgument) || contentError.Reason != "the schema has no asset model" {
-		t.Fatalf("a schema without an asset model: got %v", err)
+func TestDescriptorsMayDeclareFileFieldsAndRejectOtherFileShapes(t *testing.T) {
+	client := newTestClient(t)
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(fileDescriptor)); err != nil {
+		t.Fatalf("a descriptor with File fields: %v", err)
 	}
-	if _, err := client.Query(collection, Query{Model: "container"}); !errors.Is(err, StatusInvalidArgument) {
-		t.Fatalf("an unknown model: got %v", err)
+	named := strings.Replace(fileDescriptor, `"value":{"kind":"file"},"required":true`, `"value":{"kind":"file","name":"File"},"required":true`, 1)
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(named)); !errors.Is(err, StatusMalformed) {
+		t.Fatalf("a File value with a name: got %v", err)
 	}
-	if ids, err := client.Query(collection, Query{Model: "item"}); err != nil || len(ids) != 0 {
-		t.Fatalf("the item model: got %v %v", ids, err)
+	asset := strings.Replace(fileDescriptor, `"kind":"item","model"`, `"kind":"asset","model"`, 1)
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(asset)); !errors.Is(err, StatusMalformed) {
+		t.Fatalf("the asset node kind: got %v", err)
 	}
 }
 

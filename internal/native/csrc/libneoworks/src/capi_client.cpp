@@ -123,28 +123,13 @@ Json nodeSummary(Client& client, const LocalNode& local) {
     json["targetId"] = *node.targetId;
     json["targetRole"] = *node.targetRole;
   }
-  json["blob"] = Json(nullptr);
-  if (node.blob.has_value()) {
-    json["blob"] = blobToJson(*node.blob);
-  }
+  json["files"] = filesToJson(node.files);
   return json;
-}
-
-Result<std::optional<BlobDescriptor>> parseOptionalBlob(const Json& request) {
-  if (!request.contains("blob") || request.at("blob").is_null()) {
-    return std::optional<BlobDescriptor>();
-  }
-  Result<BlobDescriptor> blob = blobFromJson(request.at("blob"));
-  if (!blob.ok()) {
-    return blob.status();
-  }
-  return std::optional<BlobDescriptor>(blob.take());
 }
 
 Json rotationReportJson(const RotationReport& report) {
   Json json = Json::object();
   json["rotatedNodeIds"] = report.rotatedNodeIds;
-  json["blobReencryptionRequired"] = report.blobReencryptionRequired;
   return json;
 }
 
@@ -420,11 +405,6 @@ int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer
     if (json->contains("content")) {
       request.content = json->at("content");
     }
-    Result<std::optional<BlobDescriptor>> blob = parseOptionalBlob(*json);
-    if (!blob.ok()) {
-      return code(Status::Malformed);
-    }
-    request.blob = blob.take();
     Result<std::string> created = client->value->createNode(request);
     if (!created.ok()) {
       return code(created.status());
@@ -468,11 +448,6 @@ int nw_client_update_node(nw_client* client, const char* request_json) {
     if (json->contains("changes")) {
       request.changes = json->at("changes");
     }
-    Result<std::optional<BlobDescriptor>> blob = parseOptionalBlob(*json);
-    if (!blob.ok()) {
-      return code(Status::Malformed);
-    }
-    request.blob = blob.take();
     return code(client->value->updateNode(request));
   });
 }
@@ -832,10 +807,7 @@ int nw_link_list(nw_link_reader* reader, nw_buffer* json) {
       entry["kind"] = node->kind;
       entry["deleted"] = node->deleted;
       entry["updatedAt"] = node->updatedAt;
-      entry["blob"] = Json(nullptr);
-      if (node->blob.has_value()) {
-        entry["blob"] = blobToJson(*node->blob);
-      }
+      entry["files"] = filesToJson(node->files);
       list.push_back(std::move(entry));
     }
     return fillJson(json, list);
@@ -931,13 +903,12 @@ void nw_sync_free(nw_sync* sync) { delete sync; }
 
 /* ---- blobs ---- */
 
-int nw_blob_upload_begin(nw_client* client, const char* node_id, uint32_t variant_index, const char* object_id,
-                         uint64_t total_size, nw_blob_transfer** out) {
+int nw_blob_upload_begin(nw_client* client, const char* node_id, const char* object_id, nw_blob_transfer** out) {
   if (!hasArguments(client, node_id) || object_id == nullptr || out == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    auto transfer = BlobTransfer::beginUpload(*client->value, node_id, variant_index, object_id, total_size);
+    auto transfer = BlobTransfer::beginUpload(*client->value, node_id, object_id);
     if (!transfer.ok()) {
       return code(transfer.status());
     }
@@ -946,13 +917,12 @@ int nw_blob_upload_begin(nw_client* client, const char* node_id, uint32_t varian
   });
 }
 
-int nw_blob_download_begin(nw_client* client, const char* node_id, uint32_t variant_index, const char* object_id,
-                           uint32_t chunk_count, nw_blob_transfer** out) {
+int nw_blob_download_begin(nw_client* client, const char* node_id, const char* object_id, nw_blob_transfer** out) {
   if (!hasArguments(client, node_id) || object_id == nullptr || out == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    auto transfer = BlobTransfer::beginDownload(*client->value, node_id, variant_index, object_id, chunk_count);
+    auto transfer = BlobTransfer::beginDownload(*client->value, node_id, object_id);
     if (!transfer.ok()) {
       return code(transfer.status());
     }
@@ -962,15 +932,13 @@ int nw_blob_download_begin(nw_client* client, const char* node_id, uint32_t vari
 }
 
 int nw_blob_link_download_begin(nw_link_reader* reader, const char* link_id, const char* node_id,
-                                uint32_t variant_index, const char* object_id, uint32_t chunk_count,
-                                nw_blob_transfer** out) {
+                                const char* object_id, nw_blob_transfer** out) {
   bool valid = reader != nullptr && link_id != nullptr && node_id != nullptr && object_id != nullptr && out != nullptr;
   if (!valid) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    auto transfer =
-        BlobTransfer::beginLinkDownload(*reader->value, link_id, node_id, variant_index, object_id, chunk_count);
+    auto transfer = BlobTransfer::beginLinkDownload(*reader->value, link_id, node_id, object_id);
     if (!transfer.ok()) {
       return code(transfer.status());
     }
