@@ -296,7 +296,7 @@ Status Client::rekeyShortcuts(const std::string& targetId, const SymmetricKey& t
                               RotationReport& report) {
   for (const std::string& shortcutId : database_->shortcutsTo(targetId)) {
     const Node* shortcut = database_->findNode(shortcutId);
-    if (shortcut->deleted || !resolveNodeKey(*shortcut->parentId).ok()) {
+    if (!canRewrapShortcut(*shortcut)) {
       continue;
     }
     Status refreshed = refreshKeys(*shortcut->parentId, report);
@@ -385,13 +385,19 @@ std::vector<std::string> Client::exposedChainOf(const std::string& nodeId) {
   return path;
 }
 
+// Shortcuts in someone else's tree that this holder may only read are theirs to wrap again.
+bool Client::canRewrapShortcut(const Node& shortcut) {
+  bool parentKnown = !shortcut.deleted && resolveNodeKey(*shortcut.parentId).ok();
+  return parentKnown && roleRank(effectiveRole(shortcut.id)) >= roleRank("write");
+}
+
 bool Client::isExposedThroughShortcuts(const Node& node) {
   if (node.kind != "item") {
     return false;
   }
   for (const std::string& shortcutId : database_->shortcutsTo(node.id)) {
     const Node* shortcut = database_->findNode(shortcutId);
-    if (!shortcut->deleted && !exposedChainOf(shortcutId).empty()) {
+    if (canRewrapShortcut(*shortcut) && !exposedChainOf(shortcutId).empty()) {
       return true;
     }
   }

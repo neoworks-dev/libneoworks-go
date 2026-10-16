@@ -310,7 +310,9 @@ class Client {
   // From the topmost stale node among `nodeId` and its ancestors down to `nodeId`, whose keys a removed
   // principal may hold; empty when none is stale.
   std::vector<std::string> exposedChainOf(const std::string& nodeId);
-  // Whether a shortcut to the item sits under a stale node, so a removed principal may hold its key.
+  bool canRewrapShortcut(const Node& shortcut);
+  // Whether a shortcut to the item that this holder may wrap again sits under a stale node, so a
+  // removed principal may hold the item's key.
   bool isExposedThroughShortcuts(const Node& node);
   // Rotates the exposed ancestors of `nodeId` top down; true when `nodeId` itself is exposed.
   Result<bool> refreshAncestors(const std::string& nodeId, RotationReport& report);
