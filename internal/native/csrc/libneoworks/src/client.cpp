@@ -301,7 +301,7 @@ int Client::rankOnNode(const Node& node) const {
     if (!mine || !wholeNode || grant.revokedAt.has_value()) {
       continue;
     }
-    bestRank = std::max(bestRank, roleRank(grant.role));
+    bestRank = std::max(bestRank, roleRankInForce(grant));
   }
   return bestRank;
 }

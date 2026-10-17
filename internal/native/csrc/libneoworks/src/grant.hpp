@@ -25,6 +25,9 @@ struct AccessGrant {
   // The id of the grant this one was made from (see grantId), signed with it. A grant an install
   // received from its user's share of someone else's row names the user's grant; it ends with it.
   std::optional<std::string> via;
+  // The role the server reports the grant gives now. A grant made from another is capped by it, so
+  // lowering that grant lowers this one without a new signature. Never above `role`; not signed.
+  std::optional<std::string> effectiveRole;
   // Signature of this grant's access log entry, and that entry's position in the node's chain.
   Bytes signature;
   uint64_t logIndex = 0;
@@ -40,6 +43,8 @@ std::string grantId(const AccessGrant& grant);
 bool isValidGrantId(std::string_view text);
 // "read" < "write".
 int roleRank(std::string_view role);
+// The rank of the role the grant gives now: the lower of its role and the role the server reports.
+int roleRankInForce(const AccessGrant& grant);
 
 Json grantToJson(const AccessGrant& grant);
 Result<AccessGrant> grantFromJson(const Json& json);

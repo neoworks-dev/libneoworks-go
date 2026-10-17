@@ -19,6 +19,14 @@ int roleRank(std::string_view role) {
   return 0;
 }
 
+int roleRankInForce(const AccessGrant& grant) {
+  int signedRank = roleRank(grant.role);
+  if (!grant.effectiveRole.has_value()) {
+    return signedRank;
+  }
+  return std::min(signedRank, roleRank(*grant.effectiveRole));
+}
+
 std::string grantId(const std::string& nodeId, const std::string& principalType, const std::string& principalId) {
   return nodeId + ":" + principalType + ":" + principalId;
 }
@@ -75,6 +83,9 @@ Json grantToJson(const AccessGrant& grant) {
   json["via"] = Json(nullptr);
   if (grant.via.has_value()) {
     json["via"] = *grant.via;
+  }
+  if (grant.effectiveRole.has_value()) {
+    json["effectiveRole"] = *grant.effectiveRole;
   }
   json["signature"] = bytesToJson(grant.signature);
   json["logIndex"] = grant.logIndex;
@@ -152,9 +163,11 @@ Result<AccessGrant> grantFromJson(const Json& json) {
   grant.revokedAt = readOptionalString(json, "revokedAt", wellFormed);
   grant.expiresAt = readOptionalString(json, "expiresAt", wellFormed);
   grant.via = readOptionalString(json, "via", wellFormed);
+  grant.effectiveRole = readOptionalString(json, "effectiveRole", wellFormed);
+  bool roleInForceValid = !grant.effectiveRole.has_value() || isValidRole(*grant.effectiveRole);
   bool expiryValid = !grant.expiresAt.has_value() || parseCanonicalExpiry(*grant.expiresAt).has_value();
   bool viaValid = !grant.via.has_value() || isValidGrantId(*grant.via);
-  if (!wellFormed || !expiryValid || !viaValid) {
+  if (!wellFormed || !expiryValid || !viaValid || !roleInForceValid) {
     return Status::Malformed;
   }
   grant.nodeId = *scalars.nodeId;
@@ -196,7 +209,8 @@ Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey&
   bool validRequest = isLowercaseUuid(request.nodeId) && isValidPrincipalType(request.principalType) &&
                       isValidPrincipalType(request.grantedByType) && isValidRole(request.role) &&
                       isFutureExpiry(request.expiresAt) &&
-                      (!request.via.has_value() || isValidGrantId(*request.via));
+                      (!request.via.has_value() || isValidGrantId(*request.via)) &&
+                      !(request.via.has_value() && request.expiresAt.has_value());
   if (!validRequest) {
     return Status::InvalidArgument;
   }
