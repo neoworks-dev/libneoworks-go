@@ -139,25 +139,6 @@ std::optional<AccessGrant> Client::ownGrantReaching(const Node& node) const {
   return std::nullopt;
 }
 
-namespace {
-
-// A grant made from another grant lasts at most as long as it.
-Result<ShareRequest> limitedToSourceExpiry(ShareRequest request, const AccessGrant& source) {
-  if (!source.expiresAt.has_value()) {
-    return request;
-  }
-  if (!request.expiresAt.has_value()) {
-    request.expiresAt = source.expiresAt;
-    return request;
-  }
-  if (*request.expiresAt > *source.expiresAt) {
-    return Status::InvalidArgument;
-  }
-  return request;
-}
-
-}  // namespace
-
 Result<ShareRequest> Client::withSourceGrant(const Node& node, ShareRequest request) const {
   bool passesOnShare = request.principalType == "install" && signer_.authorType == "user" &&
                        trustedOwnerOf(node) != signer_.authorId;
@@ -169,7 +150,7 @@ Result<ShareRequest> Client::withSourceGrant(const Node& node, ShareRequest requ
     return Status::Forbidden;
   }
   request.via = grantId(*source);
-  return limitedToSourceExpiry(std::move(request), *source);
+  return request;
 }
 
 Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
