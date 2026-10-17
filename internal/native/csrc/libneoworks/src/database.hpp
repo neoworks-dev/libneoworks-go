@@ -66,11 +66,9 @@ class LocalDatabase {
  public:
   static Result<std::unique_ptr<LocalDatabase>> open(std::unique_ptr<RecordBackend> backend, SymmetricKey storeKey);
 
-  // Called with the node or grant's node id after a node or grant was stored or removed, and for
-  // every node a wipe removes. Not called for records read while opening the database.
+  // Called with the node id after a node was stored or removed, and for every node a wipe removes. Not called for records read while opening the database.
   using ChangeObserver = std::function<void(const std::string& nodeId)>;
   void setNodeObserver(ChangeObserver observer) { nodeObserver_ = std::move(observer); }
-  void setGrantObserver(ChangeObserver observer) { grantObserver_ = std::move(observer); }
 
   size_t corruptRecords() const { return corruptRecords_; }
 
@@ -175,7 +173,6 @@ class LocalDatabase {
   std::string cursor_;
   size_t corruptRecords_ = 0;
   ChangeObserver nodeObserver_;
-  ChangeObserver grantObserver_;
 };
 
 }  // namespace nw

@@ -182,10 +182,9 @@ class Client {
   std::vector<LinkRecord> linksFor(const std::string& nodeId) const;
   Status revokeLink(const std::string& linkId);
 
-  // After one of this holder's own grants was revoked: removes every row it no longer reaches
-  // from its active grants, following the rows that belong to a reached row and the rows it links
-  // to. Rows with a local edit stay. Does nothing when no own grant was revoked since the last call.
-  void removeRowsOutOfReach();
+  // Removes the rows the server no longer serves to this holder: deleted below a deleted row,
+  // behind a revoked grant, or no longer linked. Rows with a local edit stay.
+  void removeRowsOutOfReach(const std::vector<std::string>& nodeIds);
 
   // Identity pinning and safety codes.
   // `history` is the server's identity key history for the user (amendment 4). With it, a
@@ -252,16 +251,13 @@ class Client {
   // removed in the database, and again when keys, grants or descriptors that unlock it arrive.
   void attachIndex();
   void onNodeChanged(const std::string& nodeId);
-  void onGrantChanged(const std::string& nodeId);
   void indexNode(const std::string& nodeId);
   void indexDependentsOf(const std::string& nodeId);
   std::vector<std::string> dependentsOf(const std::string& nodeId) const;
   void indexPendingNodes();
   void resetIndexOf(const std::string& collection);
   Result<IndexedNode> indexEntryFor(const Node& node);
-  bool hasRevokedOwnGrant(const std::string& nodeId) const;
   Status acceptPulledRevocation(const AccessGrant& grant);
-  std::set<std::string> rowsInReach() const;
 
   // A row's content as stored, Files and references with their keys, and the table it names.
   struct StoredContent {
@@ -350,8 +346,6 @@ class Client {
   std::set<std::string> unindexedNodeIds_;
   // Rows whose key is being looked up through the rows linking to them, so a cycle of links ends.
   std::set<std::string> rowsResolvingThroughLinks_;
-  // Set when one of this holder's own grants was revoked, until removeRowsOutOfReach runs.
-  bool ownGrantRevoked_ = false;
 #if defined(NW_ENABLE_TEST_HOOKS)
   size_t contentDecryptions_ = 0;
 #endif

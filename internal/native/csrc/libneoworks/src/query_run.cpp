@@ -213,18 +213,29 @@ const std::vector<MemberValues>& elementsOf(const IndexedNode& node, uint32_t li
   return found->second;
 }
 
+// Whether some element has the given truth under the child condition.
+bool someElementIs(const std::vector<MemberValues>& elements, const IndexedNode& node, const Condition& child,
+                   Truth wanted) {
+  return std::any_of(elements.begin(), elements.end(), [&](const MemberValues& element) {
+    Truth truth = conditionTruth(child, Scope{node, &element});
+    return truth == wanted;
+  });
+}
+
+// As in Prisma, a quantifier is a plain yes or no: an element for which the filter is unknown is neither
+// a match nor a violation. `every` holds unless an element fails the filter, so an element without the
+// field passes `every: { note: "x" }`; test `{ note: { not: null } }` to demand the field.
 Truth elementsTruth(const Condition& condition, const IndexedNode& node) {
   const std::vector<MemberValues>& elements = elementsOf(node, condition.listOrdinal);
   const Condition& child = condition.children.front();
-  auto holds = [&](const MemberValues& element) { return conditionTruth(child, Scope{node, &element}); };
   if (condition.quantifier == Quantifier::Every) {
-    return allOf(elements, holds);
+    return truthOf(!someElementIs(elements, node, child, Truth::False));
   }
-  Truth some = anyOf(elements, holds);
+  bool matches = someElementIs(elements, node, child, Truth::True);
   if (condition.quantifier == Quantifier::Some) {
-    return some;
+    return truthOf(matches);
   }
-  return negated(some);
+  return truthOf(!matches);
 }
 
 Truth conditionTruth(const Condition& condition, const Scope& scope) {

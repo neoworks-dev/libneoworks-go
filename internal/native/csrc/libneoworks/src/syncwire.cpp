@@ -41,6 +41,16 @@ void collectEntries(const Json& entries, PullPage& page) {
   }
 }
 
+void collectLeftReach(const Json& ids, PullPage& page) {
+  for (const Json& id : ids) {
+    if (id.is_string()) {
+      page.leftReach.push_back(id.get<std::string>());
+    } else {
+      ++page.malformedEntries;
+    }
+  }
+}
+
 std::optional<PushResult::Outcome> outcomeFromText(const std::string& status) {
   if (status == "ok") {
     return PushResult::Outcome::Ok;
@@ -96,6 +106,10 @@ Result<PullPage> parsePullResponse(ByteView body) {
   const Json* accessLog = readArray(*json, "accessLog");
   if (accessLog != nullptr) {
     collectEntries(*accessLog, page);
+  }
+  const Json* leftReach = readArray(*json, "leftReach");
+  if (leftReach != nullptr) {
+    collectLeftReach(*leftReach, page);
   }
   return page;
 }

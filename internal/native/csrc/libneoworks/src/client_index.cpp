@@ -19,10 +19,6 @@ IndexedNode indexedNodeOf(const TableDescriptor& descriptor, const Json& content
   return entry;
 }
 
-bool isAddressedTo(const AccessGrant& grant, const std::string& principalType, const std::string& principalId) {
-  return grant.principalType == principalType && grant.principalId == principalId;
-}
-
 }  // namespace
 
 void Client::attachIndex() {
@@ -31,7 +27,6 @@ void Client::attachIndex() {
     unindexedNodeIds_.insert(nodeId);
   }
   database_->setNodeObserver([this](const std::string& nodeId) { onNodeChanged(nodeId); });
-  database_->setGrantObserver([this](const std::string& nodeId) { onGrantChanged(nodeId); });
 }
 
 void Client::onNodeChanged(const std::string& nodeId) {
@@ -64,21 +59,6 @@ std::vector<std::string> Client::dependentsOf(const std::string& nodeId) const {
     dependents.insert(dependents.end(), node->links.begin(), node->links.end());
   }
   return dependents;
-}
-
-void Client::onGrantChanged(const std::string& nodeId) {
-  if (hasRevokedOwnGrant(nodeId)) {
-    ownGrantRevoked_ = true;
-  }
-}
-
-bool Client::hasRevokedOwnGrant(const std::string& nodeId) const {
-  for (const AccessGrant& grant : database_->grantsForNode(nodeId)) {
-    if (isAddressedTo(grant, signer_.authorType, signer_.authorId) && grant.revokedAt.has_value()) {
-      return true;
-    }
-  }
-  return false;
 }
 
 // Also makes the table's sorted indexes exist, so that putting the entry places the row in them.
@@ -134,47 +114,10 @@ void Client::resetIndexOf(const std::string& collection) {
   }
 }
 
-// Every row reached from this holder's active grants: a whole-row grant reaches the rows belonging
-// to the row and the rows it links to, a grant on some facets only the row itself.
-std::set<std::string> Client::rowsInReach() const {
-  std::set<std::string> reached;
-  std::vector<std::string> queue;
-  for (const AccessGrant& grant : database_->allGrants()) {
-    bool active = isAddressedTo(grant, signer_.authorType, signer_.authorId) && !grant.revokedAt.has_value();
-    if (active && grant.facets.has_value()) {
-      reached.insert(grant.nodeId);
-    }
-    if (active && !grant.facets.has_value()) {
-      queue.push_back(grant.nodeId);
-    }
-  }
-  std::set<std::string> expanded;
-  while (!queue.empty()) {
-    std::string nodeId = queue.back();
-    queue.pop_back();
-    if (!expanded.insert(nodeId).second) {
-      continue;
-    }
-    reached.insert(nodeId);
-    std::vector<std::string> children = database_->childrenOf(nodeId);
-    queue.insert(queue.end(), children.begin(), children.end());
-    const Node* node = database_->findNode(nodeId);
-    if (node != nullptr) {
-      queue.insert(queue.end(), node->links.begin(), node->links.end());
-    }
-  }
-  return reached;
-}
-
-void Client::removeRowsOutOfReach() {
-  if (!ownGrantRevoked_) {
-    return;
-  }
-  ownGrantRevoked_ = false;
-  std::set<std::string> reached = rowsInReach();
-  for (const std::string& nodeId : database_->allNodeIds()) {
+void Client::removeRowsOutOfReach(const std::vector<std::string>& nodeIds) {
+  for (const std::string& nodeId : nodeIds) {
     const LocalNode* local = database_->findLocal(nodeId);
-    if (reached.count(nodeId) > 0 || local->dirty) {
+    if (local == nullptr || local->dirty) {
       continue;
     }
     keyring_.forgetNode(nodeId);

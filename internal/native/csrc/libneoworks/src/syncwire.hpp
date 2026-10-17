@@ -17,6 +17,8 @@ struct PullPage {
   std::vector<Node> nodes;
   std::vector<AccessGrant> grants;
   std::vector<AccessLogEntry> accessLog;
+  // Ids of rows that left this holder's reach since the request's cursor.
+  std::vector<std::string> leftReach;
   std::string cursor;
   bool hasMore = false;
   size_t malformedEntries = 0;

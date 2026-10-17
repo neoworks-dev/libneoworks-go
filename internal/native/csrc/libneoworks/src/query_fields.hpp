@@ -27,6 +27,10 @@ bool isList(const FieldDescriptor& field);
 
 bool isFile(const FieldDescriptor& field);
 
+// A field whose value is a message of the schema; the elements of a list of them are filtered by
+// the message's singular fields that have a value type.
+bool isMessage(const FieldDescriptor& field);
+
 // The members of a File that can be filtered and ordered: name, mediaType and size.
 bool isFilterableFileMember(const FieldDescriptor& member);
 

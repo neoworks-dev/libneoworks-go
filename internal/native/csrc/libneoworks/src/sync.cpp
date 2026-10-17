@@ -731,6 +731,7 @@ void SyncSession::applyPage() {
   page_.reset();
   report_.pulledNodes += page.nodes.size();
   report_.malformedEntries += page.malformedEntries;
+  client_.removeRowsOutOfReach(page.leftReach);
   for (size_t index = 0; index < page.nodes.size(); ++index) {
     seenDuringResync_.insert(page.nodes[index].id);
     applyNode(std::move(page.nodes[index]), pageVerified_[index]);
@@ -753,18 +754,16 @@ void SyncSession::applyPage() {
   if (report_.fullResync) {
     finishFullResync();
   }
-  client_.removeRowsOutOfReach();
 }
 
 void SyncSession::finishFullResync() {
+  std::vector<std::string> unseen;
   for (const std::string& id : client_.database().allNodeIds()) {
-    const LocalNode* local = client_.database().findLocal(id);
-    if (local->dirty || seenDuringResync_.count(id) > 0) {
-      continue;
+    if (seenDuringResync_.count(id) == 0) {
+      unseen.push_back(id);
     }
-    client_.keyring().forgetNode(id);
-    client_.database().removeNode(id);
   }
+  client_.removeRowsOutOfReach(unseen);
 }
 
 namespace {

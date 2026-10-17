@@ -409,11 +409,7 @@ std::vector<std::string> LocalDatabase::allNodeIds() const {
 
 Status LocalDatabase::putGrant(const AccessGrant& grant) {
   grants_[grantKey(grant)] = grant;
-  Status stored = store_->put("grant", grantKey(grant), encodeJson(grantToJson(grant)));
-  if (grantObserver_) {
-    grantObserver_(grant.nodeId);
-  }
-  return stored;
+  return store_->put("grant", grantKey(grant), encodeJson(grantToJson(grant)));
 }
 
 std::vector<AccessGrant> LocalDatabase::grantsForNode(const std::string& nodeId) const {

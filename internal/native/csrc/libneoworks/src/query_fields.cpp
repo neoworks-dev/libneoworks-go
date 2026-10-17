@@ -207,6 +207,10 @@ bool isList(const FieldDescriptor& field) {
 
 bool isFile(const FieldDescriptor& field) { return field.value.kind == ValueKind::File; }
 
+bool isMessage(const FieldDescriptor& field) {
+  return field.value.kind == ValueKind::Message && field.value.model != nullptr;
+}
+
 bool isFilterableFileMember(const FieldDescriptor& member) {
   return member.ordinal == kFileNameOrdinal || member.ordinal == kFileMediaTypeOrdinal ||
          member.ordinal == kFileSizeOrdinal;
@@ -261,9 +265,31 @@ MemberValues fileMembersOf(const Json& file) {
   return members;
 }
 
+MemberValues messageMembersOf(const ModelDescriptor& model, const Json& message) {
+  MemberValues members;
+  if (!message.is_object()) {
+    return members;
+  }
+  for (const FieldDescriptor& member : model.fields) {
+    auto value = message.find(member.name);
+    std::optional<FieldType> type = filterableType(member);
+    if (!type.has_value() || value == message.end() || value->is_null()) {
+      continue;
+    }
+    std::optional<Comparable> comparable = toComparable(*value, member, *type);
+    if (comparable.has_value()) {
+      members.emplace(member.ordinal, std::move(*comparable));
+    }
+  }
+  return members;
+}
+
 MemberValues memberValuesOf(const FieldDescriptor& field, const Json& value) {
   if (isFile(field)) {
     return fileMembersOf(value);
+  }
+  if (isMessage(field)) {
+    return messageMembersOf(*field.value.model, value);
   }
   MemberValues members;
   std::optional<FieldType> type = valueType(field);
@@ -278,6 +304,8 @@ MemberValues memberValuesOf(const FieldDescriptor& field, const Json& value) {
 }
 
 bool isIndexed(const FieldDescriptor& field) { return isFile(field) || valueType(field).has_value(); }
+
+bool isIndexedList(const FieldDescriptor& field) { return isList(field) && (isIndexed(field) || isMessage(field)); }
 
 }  // namespace
 
@@ -302,7 +330,7 @@ ListValues listValuesOf(const ModelDescriptor& model, const Json& content) {
   for (const FieldDescriptor& field : model.fields) {
     auto value = content.find(field.name);
     bool present = value != content.end() && value->is_array();
-    if (!isList(field) || !isIndexed(field) || !present) {
+    if (!isIndexedList(field) || !present) {
       continue;
     }
     std::vector<MemberValues>& elements = lists[field.ordinal];

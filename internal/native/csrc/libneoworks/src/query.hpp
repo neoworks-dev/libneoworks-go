@@ -10,7 +10,8 @@
 
 // Prisma-style filters over the indexed rows of one table: `{ where, orderBy, take, include }`. A
 // File field is filtered and ordered by its members, `{ image: { name: { contains: "x" } } }`, and
-// a list field by `some`, `every`, `none` and `has`. A query is validated against the table once
+// a list field by `some`, `every`, `none` and `has`; the elements of a list of Files or messages are
+// filtered by their members, `{ emails: { some: { value: { contains: "x" } } } }`. A query is validated against the table once
 // and then evaluated on indexed values without any decryption.
 namespace nw {
 

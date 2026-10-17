@@ -8,12 +8,14 @@ namespace nw {
 namespace {
 
 // The entries a filter object names: the fields of the queried model, or the members of one of its
-// File fields.
+// File fields or the fields of a message element of one of its list fields.
 struct Scope {
   const ModelDescriptor* model = nullptr;
-  bool inFile = false;
-  // The File field whose members `model` lists.
-  uint32_t fileFieldOrdinal = 0;
+  bool inMembers = false;
+  // The field whose members `model` lists.
+  uint32_t memberOwnerOrdinal = 0;
+
+  bool inFile() const { return inMembers && model == &fileModel(); }
 };
 
 struct Context {
@@ -25,6 +27,12 @@ struct Context {
 Context fileContext(const Context& context, const FieldDescriptor& field) {
   Context inner = context;
   inner.scope = Scope{&fileModel(), true, field.ordinal};
+  return inner;
+}
+
+Context messageContext(const Context& context, const FieldDescriptor& list) {
+  Context inner = context;
+  inner.scope = Scope{list.value.model, true, list.ordinal};
   return inner;
 }
 
@@ -251,8 +259,8 @@ FieldFilter filterOf(const Context& context, const FieldDescriptor& field, Field
   filter.field = &field;
   filter.type = type;
   filter.ordinal = field.ordinal;
-  if (context.scope.inFile) {
-    filter.ordinal = context.scope.fileFieldOrdinal;
+  if (context.scope.inMembers) {
+    filter.ordinal = context.scope.memberOwnerOrdinal;
     filter.member = field.ordinal;
   }
   return filter;
@@ -261,7 +269,7 @@ FieldFilter filterOf(const Context& context, const FieldDescriptor& field, Field
 Result<Condition> compileValueField(const Context& context, const FieldDescriptor& field, const Json& value,
                                     const std::string& path) {
   std::optional<FieldType> type = filterableType(field);
-  bool memberAllowed = !context.scope.inFile || isFilterableFileMember(field);
+  bool memberAllowed = !context.scope.inFile() || isFilterableFileMember(field);
   if (!type.has_value() || !memberAllowed) {
     return fail(context, path, "field " + field.name + " cannot be filtered");
   }
@@ -278,19 +286,30 @@ Result<Condition> compileFileField(const Context& context, const FieldDescriptor
   return compileWhere(fileContext(context, field), value, path);
 }
 
+Result<Condition> compileMessageElement(const Context& context, const FieldDescriptor& list, const Json& value,
+                                        const std::string& path) {
+  if (!value.is_object()) {
+    return fail(context, path, "expects an object of filters on the fields of " + list.value.model->name);
+  }
+  return compileWhere(messageContext(context, list), value, path);
+}
+
 // The condition one element of the list `field` has to meet.
 Result<Condition> compileElement(const Context& context, const FieldDescriptor& field, const Json& value,
                                  const std::string& path) {
   if (isFile(field)) {
     return compileFileField(context, field, value, path);
   }
+  if (isMessage(field)) {
+    return compileMessageElement(context, field, value, path);
+  }
   return compileFieldFilter(context, filterOf(context, field, *valueType(field)), value, path);
 }
 
 Result<Condition> compileHas(const Context& context, const FieldDescriptor& field, const Json& value,
                              const std::string& path) {
-  if (isFile(field)) {
-    return fail(context, path, "has applies to lists of plain values, use some with a filter on the File members");
+  if (!valueType(field).has_value()) {
+    return fail(context, path, "has applies to lists of plain values, use some with a filter on the members");
   }
   Result<Condition> equals =
       compileOperator(context, filterOf(context, field, *valueType(field)), "equals", value, path);
@@ -324,7 +343,7 @@ Result<Condition> compileListOperator(const Context& context, const FieldDescrip
 
 Result<Condition> compileListField(const Context& context, const FieldDescriptor& field, const Json& value,
                                    const std::string& path) {
-  if (!isFile(field) && !valueType(field).has_value()) {
+  if (!isFile(field) && !isMessage(field) && !valueType(field).has_value()) {
     return fail(context, path, "field " + field.name + " cannot be filtered");
   }
   if (!value.is_object()) {
@@ -346,6 +365,9 @@ Result<Condition> compileField(const Context& context, const std::string& name, 
   const FieldDescriptor* field = context.scope.model->fieldByName(name);
   if (field == nullptr) {
     return fail(context, path, "unknown field " + name + " on " + context.scope.model->name);
+  }
+  if (context.scope.inMembers && (isFile(*field) || isList(*field))) {
+    return fail(context, path, "field " + name + " cannot be filtered");
   }
   if (isFile(*field) && field->container.kind == ContainerKind::Singular) {
     return compileFileField(context, *field, value, path);
