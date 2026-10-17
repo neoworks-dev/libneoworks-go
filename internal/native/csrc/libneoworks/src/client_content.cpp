@@ -1,6 +1,7 @@
 #include "client.hpp"
 #include "files.hpp"
 #include "node_content.hpp"
+#include "semver.hpp"
 
 namespace nw {
 
@@ -35,8 +36,9 @@ void addAbsentFacets(const NodeDescriptor& descriptor, FacetMap& plaintexts) {
 // ── Descriptors ───────────────────────────────────────────────────────────────
 
 Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::string& collection,
-                                                                  std::string_view descriptorText) {
-  if (!isValidCollection(collection)) {
+                                                                  std::string_view descriptorText,
+                                                                  std::string_view schemaVersion) {
+  if (!isValidCollection(collection) || !parseSemverText(schemaVersion).has_value()) {
     return Status::InvalidArgument;
   }
   Result<std::shared_ptr<const SchemaDescriptor>> schema = parseDescriptor(descriptorText);
@@ -47,6 +49,7 @@ Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::str
   registered.schema = schema.take();
   registered.text = bytesOf(descriptorText);
   registered.descriptorHash = toBase64Url(hash(registered.text));
+  registered.schemaVersion = std::string(schemaVersion);
   registered.confirmed = database_->isDescriptorAccepted(collection, registered.descriptorHash);
   std::optional<DescriptorCheck> check;
   if (!registered.confirmed) {
@@ -77,6 +80,14 @@ Status Client::completeDescriptorCheck(const std::string& collection, const Http
   Status accepted = database_->acceptDescriptor(collection, registered.descriptorHash);
   indexPendingNodes();
   return accepted;
+}
+
+void Client::stampSchemaVersion(Node& node) const {
+  auto found = descriptors_.find(node.collection);
+  if (!carriesContent(node) || found == descriptors_.end()) {
+    return;
+  }
+  node.schemaVersion = found->second.schemaVersion;
 }
 
 const SchemaDescriptor* Client::descriptorFor(const std::string& collection) const {
@@ -187,6 +198,7 @@ Result<std::string> Client::createNode(const CreateNodeRequest& request) {
     return files.status();
   }
   node.files = files.take();
+  stampSchemaVersion(node);
   sealContent(node, nodeKey, plaintexts.value());
   Status stored = signAndStore(node);
   if (stored != Status::Ok) {
@@ -290,6 +302,7 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
     }
     node.files = files.take();
   }
+  stampSchemaVersion(node);
   Result<bool> rotated = writeUnderNewKey(node.id, ContentChange{plaintexts, node.files});
   if (!rotated.ok() || rotated.value()) {
     return rotated.status();

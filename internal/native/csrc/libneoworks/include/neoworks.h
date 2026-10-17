@@ -208,12 +208,14 @@ NW_API int nw_client_store_renewal_certificate(nw_client* client, const uint8_t*
                                                const uint8_t* signature, size_t signature_length);
 
 /* Sets the OpenSchema descriptor (schema.descriptor.json) this client reads and writes the
- * collection "@scope/name" with. Writes null when the registry confirmed these bytes before, else
- * {"descriptorHash", "method", "url", "isApi"}: perform that request and pass the response to
- * nw_client_complete_descriptor_check. Content of the collection cannot be read or written before.
- * NW_ERR_MALFORMED: not a valid descriptor. */
+ * collection "@scope/name" with, and its schema version "major.minor.patch" (the version in
+ * openschema.yaml), which every node whose content the client encodes records, signed. Writes null
+ * when the registry confirmed these bytes before, else {"descriptorHash", "method", "url", "isApi"}:
+ * perform that request and pass the response to nw_client_complete_descriptor_check. Content of the
+ * collection cannot be read or written before. NW_ERR_MALFORMED: not a valid descriptor;
+ * NW_ERR_INVALID_ARGUMENT: not a valid version. */
 NW_API int nw_client_register_descriptor(nw_client* client, const char* collection, const char* descriptor_json,
-                                         nw_buffer* check_json);
+                                         const char* schema_version, nw_buffer* check_json);
 /* NW_ERR_AUTHENTICATION_FAILED: the registry does not publish exactly these bytes for the
  * collection; NW_ERR_IO: any other failure, retry later. */
 NW_API int nw_client_complete_descriptor_check(nw_client* client, const char* collection, int http_status,

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <set>
 
+#include "semver.hpp"
 #include "tlv.hpp"
 #include "wire.hpp"
 
@@ -148,6 +149,9 @@ Json nodeToJson(const Node& node) {
   if (node.targetRole.has_value()) {
     json["targetRole"] = *node.targetRole;
   }
+  if (node.schemaVersion.has_value()) {
+    json["schemaVersion"] = *node.schemaVersion;
+  }
   json["deleted"] = node.deleted;
   json["baseSeq"] = node.baseSeq;
   json["seq"] = node.seq;
@@ -214,6 +218,7 @@ Result<Node> nodeFromJson(const Json& json) {
   node.certId = readOptionalString(json, "certId", wellFormed);
   node.targetId = readOptionalString(json, "targetId", wellFormed);
   node.targetRole = readOptionalString(json, "targetRole", wellFormed);
+  node.schemaVersion = readOptionalString(json, "schemaVersion", wellFormed);
   if (!wellFormed) {
     return Status::Malformed;
   }
@@ -277,6 +282,13 @@ bool hasValidShortcut(const Node& node) {
          node.content.empty() && node.files.empty();
 }
 
+bool hasValidSchemaVersion(const Node& node) {
+  if (!node.schemaVersion.has_value()) {
+    return true;
+  }
+  return node.kind != "root" && parseSemverText(*node.schemaVersion).has_value();
+}
+
 bool hasValidAuthor(const Node& node) {
   if (node.authorType == "user") {
     return !node.certId.has_value();
@@ -289,7 +301,8 @@ bool hasValidAuthor(const Node& node) {
 Status validateNodeShape(const Node& node) {
   bool structurallyValid = isValidCollection(node.collection) && isValidKind(node.kind) && node.epoch >= 1 &&
                            hasValidIdentifiers(node) && hasValidParentage(node) && hasValidShortcut(node) &&
-                           parseContent(node.content).ok() && hasValidAuthor(node);
+                           parseContent(node.content).ok() && hasValidAuthor(node) &&
+                           hasValidSchemaVersion(node);
   if (!structurallyValid) {
     return Status::Malformed;
   }
@@ -402,13 +415,15 @@ Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_v
   return aeadDecrypt(objectKeyValue, boxed, blobChunkAad(objectId, index, finalChunk));
 }
 
-Bytes nodeWriteMessage(const Node& node) {
+namespace {
+
+TlvWriter nodeWriteFields(const Node& node, const char* context) {
   Bytes wrappedKeyBytes;
   if (node.wrappedKey.has_value()) {
     wrappedKeyBytes = *node.wrappedKey;
   }
-  return TlvWriter("nw-node-write-v3")
-      .text(node.id)
+  TlvWriter writer(context);
+  writer.text(node.id)
       .optionalText(node.parentId)
       .text(node.collection)
       .text(node.kind)
@@ -419,8 +434,17 @@ Bytes nodeWriteMessage(const Node& node) {
       .optionalText(node.targetRole)
       .bytes(hash(wrappedKeyBytes))
       .bytes(hash(node.content))
-      .bytes(hash(canonicalFilesBytes(node.files)))
-      .finish();
+      .bytes(hash(canonicalFilesBytes(node.files)));
+  return writer;
+}
+
+}  // namespace
+
+Bytes nodeWriteMessage(const Node& node) {
+  if (!node.schemaVersion.has_value()) {
+    return nodeWriteFields(node, "nw-node-write-v3").finish();
+  }
+  return nodeWriteFields(node, "nw-node-write-v4").text(*node.schemaVersion).finish();
 }
 
 Status signNodeWrite(ByteView signSecret, Node& node) {

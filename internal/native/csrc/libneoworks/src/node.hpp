@@ -40,6 +40,9 @@ struct Node {
   // Set together on shortcuts only: the item the shortcut opens and the most it grants.
   std::optional<std::string> targetId;
   std::optional<std::string> targetRole;
+  // Plain and signed: the collection's schema version that encoded `content`, "major.minor.patch".
+  // Absent on roots, and on nodes the core wrote before it carried one.
+  std::optional<std::string> schemaVersion;
   bool deleted = false;
   uint64_t baseSeq = 0;
   uint64_t seq = 0;
@@ -110,6 +113,7 @@ Bytes encryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view obje
 Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
                                bool finalChunk, ByteView boxed);
 
+// "nw-node-write-v4" when the node carries a schema version, else "nw-node-write-v3".
 Bytes nodeWriteMessage(const Node& node);
 // Sets node.signature.
 Status signNodeWrite(ByteView signSecret, Node& node);

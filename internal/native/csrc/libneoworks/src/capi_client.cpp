@@ -336,12 +336,14 @@ int nw_client_store_renewal_certificate(nw_client* client, const uint8_t* renewa
 }
 
 int nw_client_register_descriptor(nw_client* client, const char* collection, const char* descriptor_json,
-                                  nw_buffer* check_json) {
-  if (!hasArguments(client, collection) || descriptor_json == nullptr || check_json == nullptr) {
+                                  const char* schema_version, nw_buffer* check_json) {
+  if (!hasArguments(client, collection) || descriptor_json == nullptr || schema_version == nullptr ||
+      check_json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    Result<std::optional<DescriptorCheck>> check = client->value->registerDescriptor(collection, descriptor_json);
+    Result<std::optional<DescriptorCheck>> check =
+        client->value->registerDescriptor(collection, descriptor_json, schema_version);
     if (!check.ok()) {
       return code(check.status());
     }
