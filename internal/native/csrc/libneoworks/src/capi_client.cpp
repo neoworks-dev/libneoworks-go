@@ -498,6 +498,19 @@ int nw_client_read_row(nw_client* client, const char* node_id, nw_buffer* json) 
   });
 }
 
+int nw_client_descriptor_text(nw_client* client, const char* collection, const char* version, nw_buffer* text) {
+  if (!hasArguments(client, collection) || version == nullptr || text == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    Result<std::string> descriptor = client->value->descriptorText(collection, version);
+    if (!descriptor.ok()) {
+      return code(descriptor.status());
+    }
+    return fillText(text, descriptor.value());
+  });
+}
+
 int nw_client_rows_below(nw_client* client, const char* collection, const char* table, const char* version,
                          nw_buffer* json) {
   if (!hasArguments(client, collection) || table == nullptr || version == nullptr || json == nullptr) {

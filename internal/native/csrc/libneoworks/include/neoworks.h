@@ -268,6 +268,11 @@ NW_API int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer
  * sync. NW_ERR_UNSUPPORTED: the row was written at a version above the registered one.
  * NW_ERR_INVALID_STATE: the descriptor of the row's version is not loaded yet. */
 NW_API int nw_client_read_row(nw_client* client, const char* node_id, nw_buffer* json);
+/* Writes the descriptor text of the collection at a schema version: the registered one, or one a
+ * sync fetched from the registry for the rows written at that version. NW_ERR_NOT_FOUND: this
+ * client holds no descriptor of that version. */
+NW_API int nw_client_descriptor_text(nw_client* client, const char* collection, const char* version,
+                                     nw_buffer* text);
 /* The live rows of table in collection that were written at a schema version below `version`, as
  * [{"id", "schemaVersion"}] in id order. Rows that record no version are not listed. */
 NW_API int nw_client_rows_below(nw_client* client, const char* collection, const char* table,

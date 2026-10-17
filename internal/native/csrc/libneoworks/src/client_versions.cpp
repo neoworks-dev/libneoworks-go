@@ -160,6 +160,18 @@ std::vector<DescriptorNeed> Client::missingDescriptors() {
   return needs;
 }
 
+Result<std::string> Client::descriptorText(const std::string& collection, const std::string& version) const {
+  auto registered = descriptors_.find(collection);
+  if (registered != descriptors_.end() && registered->second.schemaVersion == version) {
+    return textOf(registered->second.text);
+  }
+  const LocalDatabase::PublishedDescriptor* published = database_->findPublishedDescriptor(collection, version);
+  if (published == nullptr) {
+    return Status::NotFound;
+  }
+  return textOf(published->text);
+}
+
 Status Client::acceptPublishedDescriptor(const DescriptorNeed& need, const std::string& descriptorHash,
                                          const Bytes& text) {
   if (toBase64Url(hash(text)) != descriptorHash) {

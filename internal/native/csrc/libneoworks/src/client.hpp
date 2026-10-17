@@ -160,6 +160,9 @@ class Client {
   // wrote it; fetch each from the registry (schemaRecordRequest, descriptorRequest) and hand it to
   // acceptPublishedDescriptor. A sync session does this.
   std::vector<DescriptorNeed> missingDescriptors();
+  // The descriptor text of `collection` at `version`: the registered one, or a published one held
+  // from a sync. NotFound: this client holds no descriptor of that version.
+  Result<std::string> descriptorText(const std::string& collection, const std::string& version) const;
   // Keeps the descriptor of a published version once `text` is exactly the descriptor with the
   // hash the registry publishes for it, and reads the rows written at that version.
   // AuthenticationFailed: the hash differs. Malformed: not a valid descriptor.
