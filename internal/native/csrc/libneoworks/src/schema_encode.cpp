@@ -7,6 +7,7 @@
 #include "schema_codec.hpp"
 #include "schema_codec_internal.hpp"
 #include "schema_values.hpp"
+#include "semver.hpp"
 
 namespace nw {
 
@@ -152,6 +153,18 @@ bool writeUuid(const Json& value, Context& context, Writer& writer) {
   return true;
 }
 
+bool writeSemver(const Json& value, Context& context, Writer& writer) {
+  std::optional<Semver> version;
+  if (value.is_string()) {
+    version = parseSemverText(value.get_ref<const std::string&>());
+  }
+  if (!version.has_value()) {
+    return context.fail(kInvalid, "expected a version major.minor.patch, each part a 32-bit number");
+  }
+  writer.lengthDelimited(semverBody(*version));
+  return true;
+}
+
 std::optional<int64_t> parseTemporal(Scalar scalar, const std::string& text) {
   if (scalar == Scalar::Date) {
     return dateToDays(text);
@@ -201,6 +214,8 @@ bool writeScalar(Scalar scalar, const ValueConstraints& constraints, const Json&
     case Scalar::JsonValue:
       writer.lengthDelimited(viewOf(canonicalJsonText(value)));
       return true;
+    case Scalar::Semver:
+      return writeSemver(value, context, writer);
     default:
       return writeTemporal(scalar, value, context, writer);
   }

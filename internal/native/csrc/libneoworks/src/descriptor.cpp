@@ -26,7 +26,7 @@ const std::map<std::string, Scalar, std::less<>>& scalarNames() {
       {"f32", Scalar::F32},       {"f64", Scalar::F64},        {"string", Scalar::String},
       {"bytes", Scalar::Binary},   {"uuid", Scalar::Uuid},      {"json", Scalar::JsonValue},
       {"date", Scalar::Date},     {"time", Scalar::Time},      {"timestamp", Scalar::Timestamp},
-      {"duration", Scalar::Duration},
+      {"duration", Scalar::Duration}, {"semver", Scalar::Semver},
   };
   return names;
 }
@@ -104,7 +104,8 @@ std::optional<Scalar> parseScalarName(const Json& object, const char* key) {
 }
 
 bool isPackableScalar(Scalar scalar) {
-  return scalar != Scalar::String && scalar != Scalar::Binary && scalar != Scalar::Uuid && scalar != Scalar::JsonValue;
+  return scalar != Scalar::String && scalar != Scalar::Binary && scalar != Scalar::Uuid &&
+         scalar != Scalar::JsonValue && scalar != Scalar::Semver;
 }
 
 bool isPackable(const ValueShape& value) {

@@ -86,6 +86,7 @@ wire::WireType wireTypeOfScalar(Scalar scalar) {
     case Scalar::Binary:
     case Scalar::Uuid:
     case Scalar::JsonValue:
+    case Scalar::Semver:
       return wire::WireType::Len;
     default:
       return wire::WireType::Varint;
