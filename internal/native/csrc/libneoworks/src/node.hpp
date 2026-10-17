@@ -31,15 +31,17 @@ struct Node {
   std::string ownerId;
   std::string collection;
   std::string kind;
-  uint32_t epoch = 0;
+  // The row's table, by model name; absent on roots. Plain, so a reader picks the model before
+  // decrypting.
+  std::optional<std::string> table;
   std::optional<Bytes> wrappedKey;
   // A message with one LEN field per facet: key `tag * 8 + 2`, body the facet ciphertext.
   Bytes content;
   // Plain (unencrypted): the files in `content`, in the order the core collected them.
   std::vector<NodeFile> files;
-  // Set together on shortcuts only: the item the shortcut opens and the most it grants.
-  std::optional<std::string> targetId;
-  std::optional<std::string> targetRole;
+  // Plain (unencrypted): the rows whose keys the references in `content` carry, ascending and
+  // distinct. The server sends them to whoever can read this row.
+  std::vector<std::string> links;
   // Plain and signed: the collection's schema version that encoded `content`, "major.minor.patch".
   // Absent on roots, and on nodes the core wrote before it carried one.
   std::optional<std::string> schemaVersion;
@@ -52,15 +54,16 @@ struct Node {
   Bytes signature;
   std::string createdAt;
   std::string updatedAt;
-  // Server advisory (an install was revoked); not covered by the write signature.
-  bool needsRotation = false;
 };
 
 // A registry path, "@scope/name".
 bool isValidCollection(std::string_view collection);
+// "root" for a collection's root, which carries no content, or "row".
 bool isValidKind(std::string_view kind);
+// A model name: a letter or underscore, then letters, digits and underscores, at most 128 bytes.
+bool isValidTable(std::string_view table);
 bool isValidPrincipalType(std::string_view principalType);
-bool isShortcut(const Node& node);
+bool isRoot(const Node& node);
 // Malformed unless the content is LEN fields with ascending, unique facet tags.
 Result<FacetMap> parseContent(ByteView content);
 Bytes assembleContent(const FacetMap& ciphertexts);
@@ -76,11 +79,14 @@ Result<std::vector<NodeFile>> filesFromJson(const Json& json);
 // The bytes covered by H(files) in the write signature: empty for no files, otherwise the compact
 // JSON array with keys in contract order.
 Bytes canonicalFilesBytes(const std::vector<NodeFile>& files);
+// Malformed unless an array of distinct lowercase uuids in ascending order.
+Result<std::vector<std::string>> linksFromJson(const Json& json);
+// The bytes covered by H(links) in the write signature: empty for no links, otherwise the compact
+// JSON array of the ids.
+Bytes canonicalLinksBytes(const std::vector<std::string>& links);
 
-Bytes nodeKeyWrapAad(std::string_view id, const std::optional<std::string>& parentId, uint32_t epoch,
-                     uint32_t parentEpoch);
-Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, uint32_t epoch, uint64_t baseSeq,
-               bool deleted);
+Bytes nodeKeyWrapAad(std::string_view id, const std::optional<std::string>& parentId);
+Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, uint64_t baseSeq, bool deleted);
 // Binds a chunk to its object, position and the final flag, not to a node, so a File value can
 // move to another record with its stored objects.
 Bytes blobChunkAad(std::string_view objectId, uint32_t index, bool finalChunk);
@@ -91,17 +97,16 @@ SymmetricKey facetKey(const SymmetricKey& nodeKey, uint32_t tag);
 SymmetricKey objectKey(const SymmetricKey& fileKey, std::string_view objectId);
 
 Bytes wrapNodeKey(const SymmetricKey& parentKey, const SymmetricKey& nodeKey, std::string_view id,
-                  const std::optional<std::string>& parentId, uint32_t epoch, uint32_t parentEpoch);
+                  const std::optional<std::string>& parentId);
 Result<SymmetricKey> unwrapNodeKey(const SymmetricKey& parentKey, ByteView wrappedKey, std::string_view id,
-                                   const std::optional<std::string>& parentId, uint32_t epoch,
-                                   uint32_t parentEpoch);
+                                   const std::optional<std::string>& parentId);
 
-// pad then aead; the AAD binds the ciphertext to its node, facet, epoch and write.
+// pad then aead; the AAD binds the ciphertext to its node, facet and write.
 Bytes encryptFacet(const SymmetricKey& facetKeyValue, std::string_view id, std::string_view collection,
-                   uint32_t tag, uint32_t epoch, uint64_t baseSeq, bool deleted, ByteView plaintext);
+                   uint32_t tag, uint64_t baseSeq, bool deleted, ByteView plaintext);
 // NotFound when the content holds no facet with this tag.
 Result<Bytes> decryptFacet(const SymmetricKey& facetKeyValue, const Node& node, uint32_t tag);
-// Encrypts each facet under the node key for the node's current epoch and write and sets
+// Encrypts each facet under the node key for the node's current write and sets
 // node.content.
 void sealContent(Node& node, const SymmetricKey& nodeKey, const FacetMap& plaintexts);
 // Every facet's plaintext; fails if any facet does not decrypt.

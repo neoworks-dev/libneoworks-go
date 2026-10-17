@@ -16,7 +16,6 @@ struct AccessGrant {
   std::string principalId;
   std::string role;
   std::optional<std::vector<uint32_t>> facets;
-  uint32_t epoch = 0;
   Bytes wrappedKeys;
   std::string grantedByType;
   std::string grantedById;
@@ -43,7 +42,6 @@ struct GrantRequest {
   std::string principalId;
   std::string role;
   std::optional<std::vector<uint32_t>> facets;
-  uint32_t epoch = 0;
   Bytes principalEncPub;
   std::string grantedByType;
   std::string grantedById;

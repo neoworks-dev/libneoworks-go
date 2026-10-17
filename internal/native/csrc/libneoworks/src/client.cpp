@@ -8,12 +8,6 @@
 
 namespace nw {
 
-namespace {
-
-constexpr int kMaxAncestorWalk = 64;
-
-}  // namespace
-
 std::string Client::nowText() const { return formatRfc3339Utc(nowSeconds()); }
 
 int64_t Client::nowSeconds() const {
@@ -27,20 +21,6 @@ NodeLookup Client::nodeLookup() const {
   return [this](const std::string& nodeId) { return database_->findNode(nodeId); };
 }
 
-namespace {
-
-ShortcutLookup shortcutLookupOver(const LocalDatabase& database) {
-  return [&database](const std::string& targetId) {
-    std::vector<const Node*> shortcuts;
-    for (const std::string& shortcutId : database.shortcutsTo(targetId)) {
-      shortcuts.push_back(database.findNode(shortcutId));
-    }
-    return shortcuts;
-  };
-}
-
-}  // namespace
-
 std::unique_ptr<Client> Client::forInstall(Install install, std::unique_ptr<LocalDatabase> database) {
   std::unique_ptr<Client> client(new Client());
   client->signer_.authorType = "install";
@@ -50,7 +30,7 @@ std::unique_ptr<Client> Client::forInstall(Install install, std::unique_ptr<Loca
   client->encSecret_ = SecretBytes(install.encSecret.view());
   client->signPub_ = install.signPub;
   client->database_ = std::move(database);
-  client->keyring_.setShortcutLookup(shortcutLookupOver(*client->database_));
+  client->keyring_.setLinkKeyLookup([target = client.get()](const Node& row) { return target->keyThroughLinks(row); });
   client->attachIndex();
   client->restoreKeysFromDatabase();
   return client;
@@ -65,7 +45,7 @@ std::unique_ptr<Client> Client::forAccount(Account account, std::unique_ptr<Loca
   client->encSecret_ = SecretBytes(account.encSecret().view());
   client->signPub_ = Bytes(account.signPub().begin(), account.signPub().end());
   client->database_ = std::move(database);
-  client->keyring_.setShortcutLookup(shortcutLookupOver(*client->database_));
+  client->keyring_.setLinkKeyLookup([target = client.get()](const Node& row) { return target->keyThroughLinks(row); });
   PinnedIdentity ownPin;
   ownPin.identity = account.publicIdentity();
   ownPin.userVerified = true;
@@ -326,30 +306,37 @@ int Client::rankOnNode(const Node& node) const {
   return bestRank;
 }
 
-int Client::inheritedRank(const Node& node) const {
-  int bestRank = 0;
-  const Node* cursor = &node;
-  for (int step = 0; step < kMaxAncestorWalk && cursor != nullptr; ++step) {
-    bestRank = std::max(bestRank, rankOnNode(*cursor));
-    if (!cursor->parentId.has_value()) {
-      break;
-    }
-    cursor = database_->findNode(*cursor->parentId);
+int Client::rankOf(const Node& node, std::map<std::string, int>& ranks) const {
+  auto known = ranks.find(node.id);
+  if (known != ranks.end()) {
+    return known->second;
   }
+  ranks[node.id] = 0;
+  int bestRank = rankOnNode(node);
+  const Node* parent = nullptr;
+  if (node.parentId.has_value()) {
+    parent = database_->findNode(*node.parentId);
+  }
+  if (parent != nullptr) {
+    bestRank = std::max(bestRank, rankOf(*parent, ranks));
+  }
+  if (bestRank < roleRank("read")) {
+    bestRank = std::max(bestRank, rankThroughLinks(node, ranks));
+  }
+  ranks[node.id] = bestRank;
   return bestRank;
 }
 
-int Client::rankThroughShortcuts(const Node& node) const {
-  int bestRank = 0;
-  for (const std::string& shortcutId : database_->shortcutsTo(node.id)) {
-    const Node* shortcut = database_->findNode(shortcutId);
-    if (shortcut->deleted || shortcut->collection != node.collection) {
-      continue;
+// A row linking to this one carries its key, so whoever reads it reads this row; writing it stays
+// with those who may write the row itself.
+int Client::rankThroughLinks(const Node& node, std::map<std::string, int>& ranks) const {
+  for (const std::string& linkerId : database_->linkersOf(node.id)) {
+    const Node* linker = database_->findNode(linkerId);
+    if (linker != nullptr && !linker->deleted && rankOf(*linker, ranks) >= roleRank("read")) {
+      return roleRank("read");
     }
-    int granted = std::min(inheritedRank(*shortcut), roleRank(*shortcut->targetRole));
-    bestRank = std::max(bestRank, granted);
   }
-  return bestRank;
+  return 0;
 }
 
 int Client::capByScopes(int rank, const Node& node) const {
@@ -372,7 +359,8 @@ std::string Client::effectiveRole(const std::string& nodeId) const {
   if (node == nullptr) {
     return std::string();
   }
-  int rank = capByScopes(std::max(inheritedRank(*node), rankThroughShortcuts(*node)), *node);
+  std::map<std::string, int> ranks;
+  int rank = capByScopes(rankOf(*node, ranks), *node);
   if (rank == roleRank("write")) {
     return "write";
   }
@@ -414,7 +402,7 @@ Status Client::attachToParent(Node& node, const SymmetricKey& nodeKey) {
     return parentKey.status();
   }
   node.ownerId = parent->ownerId;
-  node.wrappedKey = wrapNodeKey(parentKey.value(), nodeKey, node.id, node.parentId, node.epoch, parent->epoch);
+  node.wrappedKey = wrapNodeKey(parentKey.value(), nodeKey, node.id, node.parentId);
   return Status::Ok;
 }
 
@@ -424,7 +412,6 @@ Status Client::createOwnerGrant(const Node& root, const SymmetricKey& nodeKey) {
   request.principalType = "user";
   request.principalId = signer_.authorId;
   request.role = "write";
-  request.epoch = root.epoch;
   request.principalEncPub = encPub_;
   request.grantedByType = "user";
   request.grantedById = signer_.authorId;

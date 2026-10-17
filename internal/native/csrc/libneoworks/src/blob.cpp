@@ -37,7 +37,7 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
     return Status::Forbidden;
   }
   const Node* node = client.database().findNode(nodeId);
-  if (node == nullptr || isShortcut(*node)) {
+  if (node == nullptr || isRoot(*node)) {
     return Status::InvalidArgument;
   }
   const NodeFile* file = findListedFile(*node, objectId);
@@ -61,7 +61,7 @@ Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginUpload(Client& client, 
 Result<std::unique_ptr<BlobTransfer>> BlobTransfer::beginDownload(Client& client, const std::string& nodeId,
                                                                   const std::string& objectId) {
   const Node* node = client.database().findNode(nodeId);
-  if (node == nullptr || isShortcut(*node) || !isLowercaseUuid(objectId)) {
+  if (node == nullptr || isRoot(*node) || !isLowercaseUuid(objectId)) {
     return Status::InvalidArgument;
   }
   const NodeFile* file = findListedFile(*node, objectId);

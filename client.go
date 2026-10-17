@@ -21,22 +21,29 @@ type Client struct {
 	native *C.nw_client
 }
 
-// NodeKind is a node's place in a collection's tree.
+// NodeKind says whether a node is the root of a collection or a row of one of
+// its tables.
 type NodeKind string
 
 // Node kinds.
 const (
-	NodeKindRoot      NodeKind = "root"
-	NodeKindContainer NodeKind = "container"
-	NodeKindItem      NodeKind = "item"
+	NodeKindRoot NodeKind = "root"
+	NodeKindRow  NodeKind = "row"
 )
 
-// NewNode asks for a node under ParentID. Content is the model's fields by name.
-type NewNode struct {
-	ParentID   string         `json:"parentId"`
+// NewRow asks for a row of Table in Collection. Content is the table's model
+// fields by name. A reference is the ID of a live row this client can read, and
+// the field marked @belongsTo names the row the new one belongs to; without it
+// the row sits under the client's root of the collection.
+type NewRow struct {
 	Collection string         `json:"collection"`
-	Kind       NodeKind       `json:"kind"`
+	Table      string         `json:"table"`
 	Content    map[string]any `json:"content"`
+}
+
+type newRoot struct {
+	Collection string   `json:"collection"`
+	Kind       NodeKind `json:"kind"`
 }
 
 // NodeUpdate changes some fields of a node; a nil value clears the field and
@@ -55,13 +62,17 @@ type NodeFile struct {
 	Size     uint64 `json:"size"`
 }
 
-// NodeSummary is a node as the local store lists it, without its content.
+// NodeSummary is a node as the local store lists it, without its content. Table
+// is nil for roots; Links are the IDs of the rows whose keys the row's
+// references carry.
 type NodeSummary struct {
 	ID         string     `json:"id"`
 	ParentID   *string    `json:"parentId"`
 	OwnerID    string     `json:"ownerId"`
 	Collection string     `json:"collection"`
 	Kind       NodeKind   `json:"kind"`
+	Table      *string    `json:"table"`
+	Links      []string   `json:"links"`
 	Deleted    bool       `json:"deleted"`
 	Dirty      bool       `json:"dirty"`
 	Rejected   bool       `json:"rejected"`
@@ -156,8 +167,18 @@ func (client *Client) CompleteDescriptorCheck(collection string, status int, bod
 	return check(C.nw_client_complete_descriptor_check(client.native, collectionText, C.int(status), data, length))
 }
 
-// CreateNode creates a node and returns its ID.
-func (client *Client) CreateNode(node NewNode) (string, error) {
+// CreateRoot creates the root of a collection and returns its ID. Only an
+// account creates one.
+func (client *Client) CreateRoot(collection string) (string, error) {
+	return client.createNode(newRoot{Collection: collection, Kind: NodeKindRoot})
+}
+
+// CreateRow creates a row and returns its ID.
+func (client *Client) CreateRow(row NewRow) (string, error) {
+	return client.createNode(row)
+}
+
+func (client *Client) createNode(node any) (string, error) {
 	request, err := json.Marshal(node)
 	if err != nil {
 		return "", fmt.Errorf("new node: %w", err)
@@ -186,17 +207,14 @@ func (client *Client) UpdateNode(update NodeUpdate) error {
 	return client.contentCall(C.nw_client_update_node(client.native, requestText))
 }
 
-// DeleteNode deletes a node, and with recursive its descendants.
-func (client *Client) DeleteNode(nodeID string, recursive bool) error {
+// DeleteNode deletes a row, the rows that belong to it, and the rows that link
+// to it through a cascading reference where this client may write them.
+func (client *Client) DeleteNode(nodeID string) error {
 	idText := cString(nodeID)
 	defer freeString(idText)
-	recursiveFlag := C.int(0)
-	if recursive {
-		recursiveFlag = 1
-	}
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
-	return check(C.nw_client_delete_node(client.native, idText, recursiveFlag))
+	return check(C.nw_client_delete_node(client.native, idText))
 }
 
 // ReadNode returns the fields of the node this client can open, as JSON.
@@ -238,45 +256,55 @@ func (client *Client) ListNodes(parentID, collection string) ([]NodeSummary, err
 	return nodes, nil
 }
 
-// Query is a Prisma-style filter over the items of one collection. Where holds
-// field filters (a bare value, or the operators equals, not, in, notIn, lt,
-// lte, gt, gte and for text contains, startsWith, endsWith with "mode":
-// "insensitive"), AND, OR and NOT, and "parent": a container id, operators on
-// it, or {"is": {...}} with filters on the container's fields. OrderBy lists
-// one field and direction ("asc" or "desc") per entry. Take limits the count.
-// File fields cannot be filtered or ordered on.
+// Query is a Prisma-style filter over the rows of one table. Where holds field
+// filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
+// gte and for text contains, startsWith, endsWith with "mode": "insensitive"),
+// AND, OR and NOT; a reference compares by the ID of its row. OrderBy lists one
+// field and direction ("asc" or "desc") per entry. Take limits the count.
+// Include names single references whose row is read along. File fields cannot
+// be filtered or ordered on.
 type Query struct {
 	Where   map[string]any      `json:"where,omitempty"`
 	OrderBy []map[string]string `json:"orderBy,omitempty"`
 	Take    *int                `json:"take,omitempty"`
+	Include map[string]bool     `json:"include,omitempty"`
 }
 
-// Query returns the IDs of the items in collection that match query, in
-// OrderBy order. It reads the in-memory index of field values and decrypts
-// nothing. A field the schema does not define, or an operator or value that
-// does not fit the field's type, is a *ContentError with StatusInvalidArgument;
+// QueryRow is a matching row. Include holds, for each included reference, the
+// ID of its row, or nil when that row is deleted or not readable here.
+type QueryRow struct {
+	ID      string             `json:"id"`
+	Include map[string]*string `json:"include,omitempty"`
+}
+
+// Query returns the rows of table in collection that match query, in OrderBy
+// order. It reads the in-memory index of field values and decrypts nothing. A
+// field the schema does not define, or an operator or value that does not fit
+// the field's type, is a *ContentError with StatusInvalidArgument;
 // StatusInvalidState means the collection's descriptor is not confirmed yet.
-func (client *Client) Query(collection string, query Query) ([]string, error) {
+func (client *Client) Query(collection, table string, query Query) ([]QueryRow, error) {
 	request, err := json.Marshal(query)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	collectionText := cString(collection)
 	defer freeString(collectionText)
+	tableText := cString(table)
+	defer freeString(tableText)
 	requestText := cString(string(request))
 	defer freeString(requestText)
 	var buffer C.nw_buffer
 	client.mutex.Lock()
-	err = client.contentCall(C.nw_client_query(client.native, collectionText, requestText, &buffer))
+	err = client.contentCall(C.nw_client_query(client.native, collectionText, tableText, requestText, &buffer))
 	client.mutex.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
-	if err := json.Unmarshal(takeBuffer(&buffer), &ids); err != nil {
+	var rows []QueryRow
+	if err := json.Unmarshal(takeBuffer(&buffer), &rows); err != nil {
 		return nil, fmt.Errorf("query result: %w", err)
 	}
-	return ids, nil
+	return rows, nil
 }
 
 // Wipe deletes everything the local store holds; the install keeps its keys.

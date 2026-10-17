@@ -6,45 +6,36 @@
 
 #include "files.hpp"
 #include "node_content.hpp"
+#include "references.hpp"
 #include "tlv.hpp"
 
 namespace nw {
 
 namespace {
 
-struct DecodedFragment {
-  uint32_t epoch = 0;
-  SymmetricKey key;
-};
-
-Result<DecodedFragment> decodeFragment(std::string_view fragmentKey) {
+Result<SymmetricKey> decodeFragment(std::string_view fragmentKey) {
   std::optional<Bytes> raw = fromBase64Url(fragmentKey);
-  if (!raw.has_value() || raw->size() != 4 + kKeyBytes) {
+  if (!raw.has_value() || raw->size() != kKeyBytes) {
     return Status::Malformed;
   }
-  DecodedFragment decoded;
-  decoded.epoch = decodeU32(ByteView(*raw).subspan(0, 4)).value();
-  Result<SymmetricKey> key = SymmetricKey::fromBytes(ByteView(*raw).subspan(4));
+  Result<SymmetricKey> key = SymmetricKey::fromBytes(*raw);
   sodium_memzero(raw->data(), raw->size());
-  if (!key.ok()) {
-    return key.status();
-  }
-  decoded.key = key.take();
-  return decoded;
+  return key;
 }
 
-bool isShortcutTarget(const std::map<std::string, Node>& nodes, const std::string& nodeId) {
+bool isLinked(const std::map<std::string, Node>& nodes, const std::string& nodeId) {
   return std::any_of(nodes.begin(), nodes.end(), [&](const auto& entry) {
-    return entry.second.targetId.has_value() && *entry.second.targetId == nodeId;
+    const std::vector<std::string>& links = entry.second.links;
+    return std::find(links.begin(), links.end(), nodeId) != links.end();
   });
 }
 
-// Shortcut targets come with the link but live elsewhere in the tree.
+// Linked rows come with the link but live elsewhere.
 std::string topLevelNodeId(const std::map<std::string, Node>& nodes) {
   std::string found;
   for (const auto& [id, node] : nodes) {
     bool topLevel = !node.parentId.has_value() || nodes.count(*node.parentId) == 0;
-    topLevel = topLevel && !isShortcutTarget(nodes, id);
+    topLevel = topLevel && !isLinked(nodes, id);
     if (!topLevel) {
       continue;
     }
@@ -59,22 +50,14 @@ std::string topLevelNodeId(const std::map<std::string, Node>& nodes) {
 }  // namespace
 
 Result<std::unique_ptr<LinkReader>> LinkReader::open(const Json& pullResponse, std::string_view fragmentKey) {
-  Result<DecodedFragment> fragment = decodeFragment(fragmentKey);
+  Result<SymmetricKey> fragment = decodeFragment(fragmentKey);
   const Json* nodesJson = readArray(pullResponse, "nodes");
   if (!fragment.ok() || nodesJson == nullptr) {
     return Status::Malformed;
   }
   std::unique_ptr<LinkReader> reader(new LinkReader());
   LinkReader* self = reader.get();
-  reader->keyring_.setShortcutLookup([self](const std::string& targetId) {
-    std::vector<const Node*> shortcuts;
-    for (const auto& [id, node] : self->nodes_) {
-      if (node.targetId.has_value() && *node.targetId == targetId) {
-        shortcuts.push_back(&node);
-      }
-    }
-    return shortcuts;
-  });
+  reader->keyring_.setLinkKeyLookup([self](const Node& target) { return self->keyThroughLinks(target); });
   for (const Json& entry : *nodesJson) {
     Result<Node> node = nodeFromJson(entry);
     if (node.ok() && validateNodeShape(node.value()) == Status::Ok) {
@@ -84,10 +67,10 @@ Result<std::unique_ptr<LinkReader>> LinkReader::open(const Json& pullResponse, s
   }
   reader->linkedNodeId_ = readString(pullResponse, "nodeId").value_or(topLevelNodeId(reader->nodes_));
   const Node* linked = reader->findNode(reader->linkedNodeId_);
-  if (linked == nullptr || linked->epoch != fragment.value().epoch) {
+  if (linked == nullptr) {
     return Status::NotFound;
   }
-  reader->keyring_.addNodeKey(linked->id, linked->epoch, std::move(fragment.value().key));
+  reader->keyring_.addNodeKey(linked->id, fragment.take());
   return reader;
 }
 
@@ -125,10 +108,15 @@ Status LinkReader::setDescriptor(const std::string& collection, std::string_view
   return Status::Ok;
 }
 
-Result<Json> LinkReader::readStoredContent(const Node& node, const NodeDescriptor& descriptor) {
+Result<LinkReader::StoredContent> LinkReader::readStoredContent(const Node& node) {
   NodeLookup lookup = [this](const std::string& id) { return findNode(id); };
-  Result<FacetMap> readable = readableFacets(
-      node, descriptor, [&](uint32_t tag) { return keyring_.resolveFacetKey(node, tag, lookup); });
+  FacetKeyResolver keyFor = [&](uint32_t tag) { return keyring_.resolveFacetKey(node, tag, lookup); };
+  auto schema = descriptors_.find(node.collection);
+  if (schema == descriptors_.end() || schema->second->tableByName(*node.table) == nullptr) {
+    return Status::InvalidState;
+  }
+  const TableDescriptor* table = schema->second->tableByName(*node.table);
+  Result<FacetMap> readable = readableFacets(node, *table, keyFor);
   if (!readable.ok()) {
     return readable.status();
   }
@@ -136,22 +124,36 @@ Result<Json> LinkReader::readStoredContent(const Node& node, const NodeDescripto
     return Status::NotFound;
   }
   CodecError error;
-  Result<Json> content = decodeContent(descriptor, readable.value(), error);
+  Result<Json> content = decodeContent(*table, readable.value(), error);
   if (!content.ok()) {
     return content.status();
   }
-  if (checkNodeFiles(descriptor, node, content.value()) != Status::Ok) {
+  if (checkNodeFiles(*table, node, content.value()) != Status::Ok) {
     return Status::IntegrityFailure;
   }
-  return content;
+  return StoredContent{table, content.take()};
 }
 
-const NodeDescriptor* LinkReader::descriptorOf(const Node& node) const {
-  auto schema = descriptors_.find(node.collection);
-  if (schema == descriptors_.end()) {
-    return nullptr;
+Result<SymmetricKey> LinkReader::keyThroughLinks(const Node& target) {
+  if (!rowsResolvingThroughLinks_.insert(target.id).second) {
+    return Status::NotFound;
   }
-  return schema->second->nodeByKind(node.kind);
+  Result<SymmetricKey> found = Status::NotFound;
+  for (const auto& [id, linker] : nodes_) {
+    bool links = std::find(linker.links.begin(), linker.links.end(), target.id) != linker.links.end();
+    if (!links || linker.deleted) {
+      continue;
+    }
+    Result<StoredContent> stored = readStoredContent(linker);
+    if (stored.ok()) {
+      found = findReferenceKey(*stored.value().table->model, stored.value().content, target.id);
+    }
+    if (found.ok()) {
+      break;
+    }
+  }
+  rowsResolvingThroughLinks_.erase(target.id);
+  return found;
 }
 
 Result<Json> LinkReader::readNode(const std::string& nodeId) {
@@ -159,35 +161,29 @@ Result<Json> LinkReader::readNode(const std::string& nodeId) {
   if (node == nullptr || node->deleted) {
     return Status::NotFound;
   }
-  if (node->kind == "root" || isShortcut(*node)) {
+  if (isRoot(*node)) {
     return Json::object();
   }
-  const NodeDescriptor* descriptor = descriptorOf(*node);
-  if (descriptor == nullptr) {
-    return Status::InvalidState;
+  Result<StoredContent> stored = readStoredContent(*node);
+  if (!stored.ok()) {
+    return stored.status();
   }
-  Result<Json> content = readStoredContent(*node, *descriptor);
-  if (!content.ok()) {
-    return content.status();
-  }
-  removeFileKeys(*descriptor->model, content.value());
-  return content;
+  const ModelDescriptor& model = *stored.value().table->model;
+  removeFileKeys(model, stored.value().content);
+  removeReferenceKeys(model, stored.value().content);
+  return std::move(stored.value().content);
 }
 
 Result<SymmetricKey> LinkReader::resolveFileKey(const std::string& nodeId, const std::string& objectId) {
   const Node* node = findNode(nodeId);
-  if (node == nullptr || node->deleted || node->kind == "root" || isShortcut(*node)) {
+  if (node == nullptr || node->deleted || isRoot(*node)) {
     return Status::NotFound;
   }
-  const NodeDescriptor* descriptor = descriptorOf(*node);
-  if (descriptor == nullptr) {
-    return Status::InvalidState;
+  Result<StoredContent> stored = readStoredContent(*node);
+  if (!stored.ok()) {
+    return stored.status();
   }
-  Result<Json> content = readStoredContent(*node, *descriptor);
-  if (!content.ok()) {
-    return content.status();
-  }
-  return findFileKey(*descriptor->model, content.value(), objectId);
+  return findFileKey(*stored.value().table->model, stored.value().content, objectId);
 }
 
 }  // namespace nw

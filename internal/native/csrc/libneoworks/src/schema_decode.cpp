@@ -302,6 +302,7 @@ Outcome readValue(const ValueShape& shape, const ValueConstraints& constraints, 
       return readDecimal(shape, field, context, out);
     case ValueKind::Message:
     case ValueKind::File:
+    case ValueKind::Reference:
       return readNested(*shape.model, field, context, out);
     case ValueKind::Oneof:
       return readOneof(shape, field, context, out);

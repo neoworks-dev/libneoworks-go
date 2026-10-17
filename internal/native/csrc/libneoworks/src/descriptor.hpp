@@ -11,7 +11,7 @@
 #include "status.hpp"
 
 // An OpenSchema descriptor (openschema docs/descriptor.md): a schema's models, enums
-// and Neoworks node layouts as data. Field references inside `nodes` are ordinals.
+// and Neoworks tables as data. Field references inside `tables` are ordinals.
 namespace nw {
 
 enum class Scalar {
@@ -38,7 +38,8 @@ enum class Scalar {
 };
 
 // File is the built-in file type: it is encoded and decoded as the message `fileModel()`.
-enum class ValueKind { Scalar, Enum, Message, Decimal, Oneof, File };
+// Reference is a `ref<Table>`: the message `referenceModel()`.
+enum class ValueKind { Scalar, Enum, Message, Decimal, Oneof, File, Reference };
 
 struct EnumDescriptor;
 struct ModelDescriptor;
@@ -47,13 +48,14 @@ struct OneofVariantDescriptor;
 struct ValueShape {
   ValueKind kind = ValueKind::Scalar;
   Scalar scalar = Scalar::Bool;
-  // Enum or model name, resolved into enumType / model after parsing. A File has `fileModel()`.
+  // Enum or model name, resolved into enumType / model after parsing. A File has `fileModel()`,
+  // a Reference `referenceModel()`.
   std::string name;
   const EnumDescriptor* enumType = nullptr;
   const ModelDescriptor* model = nullptr;
   uint32_t precision = 0;
   uint32_t scale = 0;
-  // A uuid scalar that names a node of this (qualified) model; empty for any other value.
+  // The qualified name of the table a Reference names; empty for any other value.
   std::string reference;
   std::vector<OneofVariantDescriptor> variants;
 };
@@ -124,19 +126,22 @@ struct TimeRangeDescriptor {
   uint32_t end = 0;
 };
 
-// kind is "container" or "item". `searchable` and `title` name string or File fields; a File is
-// indexed by its name.
-struct NodeDescriptor {
-  std::string kind;
+// A model stored as rows. `searchable` and `title` name string or File fields; a File is indexed
+// by its name. `belongsTo` names the single Reference whose row this row's key is wrapped under,
+// and `cascade` the References whose row's deletion deletes this one.
+struct TableDescriptor {
   std::string modelName;
   const ModelDescriptor* model = nullptr;
   std::vector<FacetDescriptor> facets;
   std::vector<uint32_t> searchable;
   std::optional<uint32_t> title;
   std::optional<TimeRangeDescriptor> timeRange;
+  std::optional<uint32_t> belongsTo;
+  std::vector<uint32_t> cascade;
 
   const FacetDescriptor* facetOfField(uint32_t ordinal) const;
   const FacetDescriptor* facetByTag(uint32_t tag) const;
+  bool cascades(uint32_t ordinal) const;
 };
 
 struct SchemaDescriptor {
@@ -144,11 +149,11 @@ struct SchemaDescriptor {
   std::string namespaceName;
   std::vector<EnumDescriptor> enums;
   std::vector<ModelDescriptor> models;
-  std::vector<NodeDescriptor> nodes;
+  std::vector<TableDescriptor> tables;
 
   const ModelDescriptor* modelByName(std::string_view modelName) const;
   const EnumDescriptor* enumByName(std::string_view enumName) const;
-  const NodeDescriptor* nodeByKind(std::string_view kind) const;
+  const TableDescriptor* tableByName(std::string_view modelName) const;
 };
 
 // The message a File value is: {objectId: uuid, name: string, mediaType: string, size: u64,
@@ -156,7 +161,11 @@ struct SchemaDescriptor {
 // {objectId, size}. The key encrypts the file's objects and never leaves the core.
 const ModelDescriptor& fileModel();
 
-constexpr uint32_t kDescriptorVersion = 1;
+// The message a reference is: {id: uuid, key: 32 bytes, absent on a @belongsTo field} with the
+// ordinals 1 and 2. The key is the referenced row's key and never leaves the core.
+const ModelDescriptor& referenceModel();
+
+constexpr uint32_t kDescriptorVersion = 2;
 constexpr uint32_t kDefaultFacetTag = 1;
 constexpr const char* kDefaultFacetName = "default";
 
@@ -165,7 +174,8 @@ uint32_t facetTagForName(std::string_view facetName);
 
 // Malformed for anything the openschema descriptor target would not emit: unknown keys or
 // types, unresolved names, ordinals out of range or repeated, facets that do not cover each
-// node field exactly once, tags that do not match their names, invalid patterns.
+// table field exactly once, tags that do not match their names, invalid patterns, a @belongsTo
+// that is not a single reference to a table of the schema.
 Result<std::shared_ptr<const SchemaDescriptor>> parseDescriptor(std::string_view text);
 
 }  // namespace nw

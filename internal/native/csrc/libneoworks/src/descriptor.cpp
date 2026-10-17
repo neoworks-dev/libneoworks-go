@@ -256,6 +256,19 @@ std::optional<ValueShape> parseFile(const Json& json) {
   return shape;
 }
 
+std::optional<ValueShape> parseReference(const Json& json) {
+  std::optional<std::string> table = readString(json, "model");
+  if (!hasOnlyKeys(json, {"kind", "model"}) || !table.has_value() || table->empty()) {
+    return std::nullopt;
+  }
+  ValueShape shape;
+  shape.kind = ValueKind::Reference;
+  shape.name = referenceModel().name;
+  shape.model = &referenceModel();
+  shape.reference = *table;
+  return shape;
+}
+
 std::optional<ValueShape> parseNamed(const Json& json, ValueKind kind) {
   std::optional<std::string> name = readString(json, "name");
   if (!hasOnlyKeys(json, {"kind", "name"}) || !name.has_value()) {
@@ -274,17 +287,15 @@ std::optional<ValueShape> parseValue(const Json& json, size_t depth) {
   }
   if (*kind == "scalar") {
     std::optional<Scalar> scalar = parseScalarName(json, "scalar");
-    std::optional<std::string> reference = readString(json, "reference");
-    bool referenceFits = !json.contains("reference") || (reference.has_value() && !reference->empty() && scalar == Scalar::Uuid);
-    if (!hasOnlyKeys(json, {"kind", "scalar", "reference"}) || !scalar.has_value() || !referenceFits) {
+    if (!hasOnlyKeys(json, {"kind", "scalar"}) || !scalar.has_value()) {
       return std::nullopt;
     }
     ValueShape shape;
     shape.scalar = *scalar;
-    if (reference.has_value()) {
-      shape.reference = *reference;
-    }
     return shape;
+  }
+  if (*kind == "ref") {
+    return parseReference(json);
   }
   if (*kind == "enum") {
     return parseNamed(json, ValueKind::Enum);
@@ -544,7 +555,7 @@ std::optional<EnumDescriptor> parseEnum(const Json& json) {
   return enumType;
 }
 
-// ── Nodes ─────────────────────────────────────────────────────────────────────
+// ── Tables ────────────────────────────────────────────────────────────────────
 
 std::optional<FacetDescriptor> parseFacet(const Json& json) {
   std::optional<std::string> name = readString(json, "name");
@@ -598,32 +609,40 @@ bool parseOptionalTimeRange(const Json& json, std::optional<TimeRangeDescriptor>
   return into.has_value();
 }
 
-std::optional<NodeDescriptor> parseNode(const Json& json) {
-  if (!hasOnlyKeys(json, {"kind", "model", "facets", "searchable", "title", "timeRange"})) {
-    return std::nullopt;
-  }
-  NodeDescriptor node;
-  std::optional<std::string> kind = readString(json, "kind");
-  std::optional<std::string> model = readString(json, "model");
-  std::optional<std::vector<uint32_t>> searchable = readOrdinalList(json, "searchable");
+bool parseFacets(const Json& json, std::vector<FacetDescriptor>& into) {
   const Json* facets = readArray(json, "facets");
-  bool wellFormed = kind.has_value() && (*kind == "container" || *kind == "item") && model.has_value() &&
-                    searchable.has_value() && facets != nullptr && parseOptionalOrdinal(json, "title", node.title) &&
-                    parseOptionalTimeRange(json, node.timeRange);
-  if (!wellFormed) {
-    return std::nullopt;
+  if (facets == nullptr) {
+    return false;
   }
-  node.kind = *kind;
-  node.modelName = *model;
-  node.searchable = std::move(*searchable);
   for (const Json& entry : *facets) {
     std::optional<FacetDescriptor> facet = parseFacet(entry);
     if (!facet.has_value()) {
-      return std::nullopt;
+      return false;
     }
-    node.facets.push_back(std::move(*facet));
+    into.push_back(std::move(*facet));
   }
-  return node;
+  return true;
+}
+
+std::optional<TableDescriptor> parseTable(const Json& json) {
+  if (!hasOnlyKeys(json, {"model", "facets", "searchable", "title", "timeRange", "belongsTo", "cascade"})) {
+    return std::nullopt;
+  }
+  TableDescriptor table;
+  std::optional<std::string> model = readString(json, "model");
+  std::optional<std::vector<uint32_t>> searchable = readOrdinalList(json, "searchable");
+  std::optional<std::vector<uint32_t>> cascade = readOrdinalList(json, "cascade");
+  bool wellFormed = model.has_value() && searchable.has_value() && cascade.has_value() &&
+                    parseOptionalOrdinal(json, "title", table.title) &&
+                    parseOptionalOrdinal(json, "belongsTo", table.belongsTo) &&
+                    parseOptionalTimeRange(json, table.timeRange) && parseFacets(json, table.facets);
+  if (!wellFormed) {
+    return std::nullopt;
+  }
+  table.modelName = *model;
+  table.searchable = std::move(*searchable);
+  table.cascade = std::move(*cascade);
+  return table;
 }
 
 // ── Resolution and cross-checks ───────────────────────────────────────────────
@@ -655,24 +674,24 @@ bool resolveModels(SchemaDescriptor& schema) {
   return true;
 }
 
-bool coverFacetFields(const NodeDescriptor& node, const FacetDescriptor& facet, std::set<uint32_t>& covered) {
+bool coverFacetFields(const TableDescriptor& table, const FacetDescriptor& facet, std::set<uint32_t>& covered) {
   for (uint32_t ordinal : facet.fields) {
-    if (node.model->fieldByOrdinal(ordinal) == nullptr || !covered.insert(ordinal).second) {
+    if (table.model->fieldByOrdinal(ordinal) == nullptr || !covered.insert(ordinal).second) {
       return false;
     }
   }
   return true;
 }
 
-bool facetsPartitionModel(const NodeDescriptor& node) {
+bool facetsPartitionModel(const TableDescriptor& table) {
   std::set<uint32_t> covered;
   std::set<uint32_t> tags;
-  for (const FacetDescriptor& facet : node.facets) {
-    if (!tags.insert(facet.tag).second || !coverFacetFields(node, facet, covered)) {
+  for (const FacetDescriptor& facet : table.facets) {
+    if (!tags.insert(facet.tag).second || !coverFacetFields(table, facet, covered)) {
       return false;
     }
   }
-  return covered.size() == node.model->fields.size();
+  return covered.size() == table.model->fields.size();
 }
 
 bool isTextValue(const ValueShape& value) {
@@ -694,29 +713,58 @@ bool isSingularTimestamp(const FieldDescriptor* field) {
          field->value.kind == ValueKind::Scalar && field->value.scalar == Scalar::Timestamp;
 }
 
-bool indexesFitModel(const NodeDescriptor& node) {
-  const ModelDescriptor& model = *node.model;
-  bool searchableFit = std::all_of(node.searchable.begin(), node.searchable.end(),
+bool indexesFitModel(const TableDescriptor& table) {
+  const ModelDescriptor& model = *table.model;
+  bool searchableFit = std::all_of(table.searchable.begin(), table.searchable.end(),
                                    [&](uint32_t ordinal) { return isTextField(model.fieldByOrdinal(ordinal), true); });
-  bool titleFits = !node.title.has_value() || isTextField(model.fieldByOrdinal(*node.title), false);
-  if (!node.timeRange.has_value()) {
+  bool titleFits = !table.title.has_value() || isTextField(model.fieldByOrdinal(*table.title), false);
+  if (!table.timeRange.has_value()) {
     return searchableFit && titleFits;
   }
-  const TimeRangeDescriptor& range = *node.timeRange;
+  const TimeRangeDescriptor& range = *table.timeRange;
   bool rangeFits = isSingularTimestamp(model.fieldByOrdinal(range.start)) &&
                    isSingularTimestamp(model.fieldByOrdinal(range.end)) &&
-                   node.facetOfField(range.start) == node.facetOfField(range.end);
+                   table.facetOfField(range.start) == table.facetOfField(range.end);
   return searchableFit && titleFits && rangeFits;
 }
 
-bool resolveNodes(SchemaDescriptor& schema) {
-  std::set<std::string> kinds;
-  for (NodeDescriptor& node : schema.nodes) {
-    node.model = schema.modelByName(node.modelName);
-    if (node.model == nullptr || !kinds.insert(node.kind).second) {
+bool isReferenceField(const FieldDescriptor* field) {
+  if (field == nullptr || field->value.kind != ValueKind::Reference) {
+    return false;
+  }
+  return field->container.kind != ContainerKind::Map && field->container.kind != ContainerKind::WrapperMap;
+}
+
+bool namesTableOf(const SchemaDescriptor& schema, const std::string& reference) {
+  return std::any_of(schema.tables.begin(), schema.tables.end(), [&](const TableDescriptor& table) {
+    return schema.namespaceName + "." + table.modelName == reference;
+  });
+}
+
+// A @belongsTo is a single reference to a table of this schema; a cascade is any other reference.
+bool relationsFitModel(const SchemaDescriptor& schema, const TableDescriptor& table) {
+  bool cascadesFit = std::all_of(table.cascade.begin(), table.cascade.end(), [&](uint32_t ordinal) {
+    return isReferenceField(table.model->fieldByOrdinal(ordinal)) && ordinal != table.belongsTo;
+  });
+  if (!table.belongsTo.has_value()) {
+    return cascadesFit;
+  }
+  const FieldDescriptor* field = table.model->fieldByOrdinal(*table.belongsTo);
+  bool belongsToFits = isReferenceField(field) && field->container.kind == ContainerKind::Singular &&
+                       namesTableOf(schema, field->value.reference);
+  return cascadesFit && belongsToFits;
+}
+
+bool resolveTables(SchemaDescriptor& schema) {
+  std::set<std::string> names;
+  for (TableDescriptor& table : schema.tables) {
+    table.model = schema.modelByName(table.modelName);
+    if (table.model == nullptr || !names.insert(table.modelName).second) {
       return false;
     }
-    if (!facetsPartitionModel(node) || !indexesFitModel(node)) {
+  }
+  for (const TableDescriptor& table : schema.tables) {
+    if (!facetsPartitionModel(table) || !indexesFitModel(table) || !relationsFitModel(schema, table)) {
       return false;
     }
   }
@@ -746,6 +794,22 @@ bool parseList(const Json& json, const char* key, std::vector<Item>& into, Parse
 }
 
 }  // namespace
+
+const ModelDescriptor& referenceModel() {
+  static const ModelDescriptor model = [] {
+    ModelDescriptor reference;
+    reference.name = "Ref";
+    reference.fields.push_back(builtInField(1, "id", Scalar::Uuid));
+    FieldDescriptor key = builtInField(2, "key", Scalar::Binary);
+    key.required = false;
+    key.container.nullable = true;
+    key.constraints.minLength = kKeyBytes;
+    key.constraints.maxLength = kKeyBytes;
+    reference.fields.push_back(key);
+    return reference;
+  }();
+  return model;
+}
 
 const ModelDescriptor& fileModel() {
   static const ModelDescriptor model = [] {
@@ -798,7 +862,7 @@ const EnumVariantDescriptor* EnumDescriptor::variantByName(std::string_view vari
   return nullptr;
 }
 
-const FacetDescriptor* NodeDescriptor::facetOfField(uint32_t ordinal) const {
+const FacetDescriptor* TableDescriptor::facetOfField(uint32_t ordinal) const {
   for (const FacetDescriptor& facet : facets) {
     if (std::find(facet.fields.begin(), facet.fields.end(), ordinal) != facet.fields.end()) {
       return &facet;
@@ -807,7 +871,11 @@ const FacetDescriptor* NodeDescriptor::facetOfField(uint32_t ordinal) const {
   return nullptr;
 }
 
-const FacetDescriptor* NodeDescriptor::facetByTag(uint32_t tag) const {
+bool TableDescriptor::cascades(uint32_t ordinal) const {
+  return std::find(cascade.begin(), cascade.end(), ordinal) != cascade.end();
+}
+
+const FacetDescriptor* TableDescriptor::facetByTag(uint32_t tag) const {
   for (const FacetDescriptor& facet : facets) {
     if (facet.tag == tag) {
       return &facet;
@@ -834,10 +902,10 @@ const EnumDescriptor* SchemaDescriptor::enumByName(std::string_view enumName) co
   return nullptr;
 }
 
-const NodeDescriptor* SchemaDescriptor::nodeByKind(std::string_view kind) const {
-  for (const NodeDescriptor& node : nodes) {
-    if (node.kind == kind) {
-      return &node;
+const TableDescriptor* SchemaDescriptor::tableByName(std::string_view modelName) const {
+  for (const TableDescriptor& table : tables) {
+    if (table.modelName == modelName) {
+      return &table;
     }
   }
   return nullptr;
@@ -854,7 +922,7 @@ uint32_t facetTagForName(std::string_view facetName) {
 
 Result<std::shared_ptr<const SchemaDescriptor>> parseDescriptor(std::string_view text) {
   std::optional<Json> json = parseJson(text);
-  if (!json.has_value() || !hasOnlyKeys(*json, {"descriptorVersion", "namespace", "enums", "models", "nodes"})) {
+  if (!json.has_value() || !hasOnlyKeys(*json, {"descriptorVersion", "namespace", "enums", "models", "tables"})) {
     return Status::Malformed;
   }
   auto schema = std::make_shared<SchemaDescriptor>();
@@ -867,11 +935,11 @@ Result<std::shared_ptr<const SchemaDescriptor>> parseDescriptor(std::string_view
   schema->namespaceName = *namespaceName;
   bool parsed = parseList(*json, "enums", schema->enums, parseEnum) &&
                 parseList(*json, "models", schema->models, parseModel) &&
-                parseList(*json, "nodes", schema->nodes, parseNode);
+                parseList(*json, "tables", schema->tables, parseTable);
   if (!parsed || !namesAreUnique(schema->enums) || !namesAreUnique(schema->models)) {
     return Status::Malformed;
   }
-  if (!resolveModels(*schema) || !resolveNodes(*schema)) {
+  if (!resolveModels(*schema) || !resolveTables(*schema)) {
     return Status::Malformed;
   }
   return std::shared_ptr<const SchemaDescriptor>(std::move(schema));

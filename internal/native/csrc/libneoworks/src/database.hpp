@@ -83,8 +83,8 @@ class LocalDatabase {
   Status removeNode(const std::string& nodeId);
   std::vector<std::string> childrenOf(const std::string& parentId) const;
   std::vector<std::string> nodesInCollection(const std::string& collection) const;
-  // Shortcuts whose targetId is `targetId`, deleted ones included.
-  std::vector<std::string> shortcutsTo(const std::string& targetId) const;
+  // Rows whose links include `targetId`.
+  std::vector<std::string> linkersOf(const std::string& targetId) const;
   std::vector<std::string> dirtyNodeIds() const;
   std::vector<std::string> allNodeIds() const;
 
@@ -154,10 +154,10 @@ class LocalDatabase {
 
   std::unique_ptr<EncryptedRecordStore> store_;
   std::map<std::string, LocalNode> nodes_;
-  // Node ids by parent id, by shortcut target id and by collection, and the dirty ones, kept in
-  // step with nodes_ by indexNode and unindexNode.
+  // Node ids by parent id, by linked row and by collection, and the dirty ones, kept in step with
+  // nodes_ by indexNode and unindexNode.
   std::map<std::string, std::set<std::string>> childrenByParent_;
-  std::map<std::string, std::set<std::string>> shortcutsByTarget_;
+  std::map<std::string, std::set<std::string>> linkersByTarget_;
   std::map<std::string, std::set<std::string>> nodesByCollection_;
   std::set<std::string> dirtyNodeIds_;
   // By "<nodeId>/<principalType>/<principalId>", so a node's grants are one key range.

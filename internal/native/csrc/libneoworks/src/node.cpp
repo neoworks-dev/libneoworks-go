@@ -13,10 +13,10 @@ namespace {
 
 constexpr std::string_view kFacetContext = "nwfacet1";
 constexpr std::string_view kObjectKeyContext = "nwfile02";
-constexpr std::string_view kKinds[] = {"root", "container", "item"};
+constexpr std::string_view kKinds[] = {"root", "row"};
 constexpr std::string_view kPrincipalTypes[] = {"user", "install"};
-constexpr std::string_view kTargetRoles[] = {"read", "write"};
 constexpr size_t kMaxRegistrySegment = 64;
+constexpr size_t kMaxTableName = 128;
 
 template <size_t Count>
 bool isOneOf(const std::string_view (&allowed)[Count], std::string_view candidate) {
@@ -48,8 +48,20 @@ bool isValidCollection(std::string_view collection) {
 }
 
 bool isValidKind(std::string_view kind) { return isOneOf(kKinds, kind); }
+
+bool isValidTable(std::string_view table) {
+  if (table.empty() || table.size() > kMaxTableName) {
+    return false;
+  }
+  auto identifierCharacter = [](char character) {
+    bool letter = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z');
+    return letter || (character >= '0' && character <= '9') || character == '_';
+  };
+  bool leadsWell = !(table.front() >= '0' && table.front() <= '9');
+  return leadsWell && std::all_of(table.begin(), table.end(), identifierCharacter);
+}
 bool isValidPrincipalType(std::string_view principalType) { return isOneOf(kPrincipalTypes, principalType); }
-bool isShortcut(const Node& node) { return node.targetId.has_value(); }
+bool isRoot(const Node& node) { return node.kind == "root"; }
 
 Result<FacetMap> parseContent(ByteView content) {
   FacetMap facets;
@@ -124,6 +136,28 @@ Bytes canonicalFilesBytes(const std::vector<NodeFile>& files) {
   return bytesOf(dumpCompact(filesToJson(files)));
 }
 
+Result<std::vector<std::string>> linksFromJson(const Json& json) {
+  if (!json.is_array()) {
+    return Status::Malformed;
+  }
+  std::vector<std::string> links;
+  for (const Json& entry : json) {
+    bool ascending = links.empty() || (entry.is_string() && entry.get_ref<const std::string&>() > links.back());
+    if (!entry.is_string() || !isLowercaseUuid(entry.get_ref<const std::string&>()) || !ascending) {
+      return Status::Malformed;
+    }
+    links.push_back(entry.get<std::string>());
+  }
+  return links;
+}
+
+Bytes canonicalLinksBytes(const std::vector<std::string>& links) {
+  if (links.empty()) {
+    return Bytes();
+  }
+  return bytesOf(dumpCompact(Json(links)));
+}
+
 Json nodeToJson(const Node& node) {
   Json json = Json::object();
   json["id"] = node.id;
@@ -134,21 +168,17 @@ Json nodeToJson(const Node& node) {
   json["ownerId"] = node.ownerId;
   json["collection"] = node.collection;
   json["kind"] = node.kind;
-  json["epoch"] = node.epoch;
+  json["table"] = Json(nullptr);
+  if (node.table.has_value()) {
+    json["table"] = *node.table;
+  }
   json["wrappedKey"] = Json(nullptr);
   if (node.wrappedKey.has_value()) {
     json["wrappedKey"] = bytesToJson(*node.wrappedKey);
   }
   json["content"] = toBase64Url(node.content);
   json["files"] = filesToJson(node.files);
-  json["targetId"] = Json(nullptr);
-  json["targetRole"] = Json(nullptr);
-  if (node.targetId.has_value()) {
-    json["targetId"] = *node.targetId;
-  }
-  if (node.targetRole.has_value()) {
-    json["targetRole"] = *node.targetRole;
-  }
+  json["links"] = Json(node.links);
   if (node.schemaVersion.has_value()) {
     json["schemaVersion"] = *node.schemaVersion;
   }
@@ -164,9 +194,6 @@ Json nodeToJson(const Node& node) {
   json["signature"] = bytesToJson(node.signature);
   json["createdAt"] = node.createdAt;
   json["updatedAt"] = node.updatedAt;
-  if (node.needsRotation) {
-    json["needsRotation"] = true;
-  }
   return json;
 }
 
@@ -174,14 +201,14 @@ namespace {
 
 struct NodeScalars {
   std::optional<std::string> id, ownerId, collection, kind, authorType, authorId, createdAt, updatedAt;
-  std::optional<uint64_t> epoch, baseSeq, seq;
+  std::optional<uint64_t> baseSeq, seq;
   std::optional<bool> deleted;
   std::optional<Bytes> signature;
   std::optional<Bytes> content;
 
   bool complete() const {
-    return id && ownerId && collection && kind && authorType && authorId && createdAt && updatedAt && epoch &&
-           baseSeq && seq && deleted && signature && content;
+    return id && ownerId && collection && kind && authorType && authorId && createdAt && updatedAt && baseSeq &&
+           seq && deleted && signature && content;
   }
 };
 
@@ -195,7 +222,6 @@ NodeScalars readNodeScalars(const Json& json) {
   scalars.authorId = readString(json, "authorId");
   scalars.createdAt = readString(json, "createdAt");
   scalars.updatedAt = readString(json, "updatedAt");
-  scalars.epoch = readUnsigned(json, "epoch");
   scalars.baseSeq = readUnsigned(json, "baseSeq");
   scalars.seq = readUnsigned(json, "seq");
   scalars.deleted = readBool(json, "deleted");
@@ -204,11 +230,19 @@ NodeScalars readNodeScalars(const Json& json) {
   return scalars;
 }
 
+// Lists a writer leaves out read as empty.
+Json arrayOrEmpty(const Json& json, const char* key) {
+  if (!json.contains(key)) {
+    return Json::array();
+  }
+  return json.at(key);
+}
+
 }  // namespace
 
 Result<Node> nodeFromJson(const Json& json) {
   NodeScalars scalars = readNodeScalars(json);
-  if (!scalars.complete() || *scalars.epoch > UINT32_MAX) {
+  if (!scalars.complete()) {
     return Status::Malformed;
   }
   bool wellFormed = true;
@@ -216,27 +250,26 @@ Result<Node> nodeFromJson(const Json& json) {
   node.parentId = readOptionalString(json, "parentId", wellFormed);
   node.wrappedKey = readOptionalBytes(json, "wrappedKey", wellFormed);
   node.certId = readOptionalString(json, "certId", wellFormed);
-  node.targetId = readOptionalString(json, "targetId", wellFormed);
-  node.targetRole = readOptionalString(json, "targetRole", wellFormed);
+  node.table = readOptionalString(json, "table", wellFormed);
   node.schemaVersion = readOptionalString(json, "schemaVersion", wellFormed);
   if (!wellFormed) {
     return Status::Malformed;
   }
   node.content = std::move(*scalars.content);
-  Json filesJson = Json::array();
-  if (json.contains("files")) {
-    filesJson = json.at("files");
-  }
-  Result<std::vector<NodeFile>> files = filesFromJson(filesJson);
+  Result<std::vector<NodeFile>> files = filesFromJson(arrayOrEmpty(json, "files"));
   if (!files.ok()) {
     return files.status();
   }
   node.files = files.take();
+  Result<std::vector<std::string>> links = linksFromJson(arrayOrEmpty(json, "links"));
+  if (!links.ok()) {
+    return links.status();
+  }
+  node.links = links.take();
   node.id = *scalars.id;
   node.ownerId = *scalars.ownerId;
   node.collection = *scalars.collection;
   node.kind = *scalars.kind;
-  node.epoch = static_cast<uint32_t>(*scalars.epoch);
   node.deleted = *scalars.deleted;
   node.baseSeq = *scalars.baseSeq;
   node.seq = *scalars.seq;
@@ -245,7 +278,6 @@ Result<Node> nodeFromJson(const Json& json) {
   node.signature = std::move(*scalars.signature);
   node.createdAt = *scalars.createdAt;
   node.updatedAt = *scalars.updatedAt;
-  node.needsRotation = readBool(json, "needsRotation").value_or(false);
   return node;
 }
 
@@ -258,28 +290,28 @@ bool hasValidIdentifiers(const Node& node) {
   if (node.parentId.has_value() && !isLowercaseUuid(*node.parentId)) {
     return false;
   }
-  bool validTarget = !node.targetId.has_value() || isLowercaseUuid(*node.targetId);
-  return validTarget && (!node.certId.has_value() || isLowercaseUuid(*node.certId));
+  return !node.certId.has_value() || isLowercaseUuid(*node.certId);
 }
 
 bool hasValidParentage(const Node& node) {
-  bool isRoot = node.kind == "root";
-  if (isRoot) {
-    return !node.parentId.has_value() && !node.wrappedKey.has_value() && node.content.empty();
+  if (isRoot(node)) {
+    bool empty = node.content.empty() && node.files.empty() && node.links.empty() && !node.table.has_value();
+    return !node.parentId.has_value() && !node.wrappedKey.has_value() && empty;
   }
-  return node.parentId.has_value() && node.wrappedKey.has_value();
+  bool named = node.table.has_value() && isValidTable(*node.table);
+  return named && node.parentId.has_value() && node.wrappedKey.has_value() && *node.parentId != node.id;
 }
 
-// Shortcuts are items with no content or files of their own, pointing at another node.
-bool hasValidShortcut(const Node& node) {
-  if (node.targetId.has_value() != node.targetRole.has_value()) {
-    return false;
+// Links are distinct uuids in ascending order, and a row never links to itself.
+bool hasValidLinks(const Node& node) {
+  for (size_t index = 0; index < node.links.size(); ++index) {
+    const std::string& link = node.links[index];
+    bool ascending = index == 0 || link > node.links[index - 1];
+    if (!isLowercaseUuid(link) || !ascending || link == node.id) {
+      return false;
+    }
   }
-  if (!node.targetId.has_value()) {
-    return true;
-  }
-  return node.kind == "item" && isOneOf(kTargetRoles, *node.targetRole) && *node.targetId != node.id &&
-         node.content.empty() && node.files.empty();
+  return true;
 }
 
 bool hasValidSchemaVersion(const Node& node) {
@@ -299,28 +331,24 @@ bool hasValidAuthor(const Node& node) {
 }  // namespace
 
 Status validateNodeShape(const Node& node) {
-  bool structurallyValid = isValidCollection(node.collection) && isValidKind(node.kind) && node.epoch >= 1 &&
-                           hasValidIdentifiers(node) && hasValidParentage(node) && hasValidShortcut(node) &&
-                           parseContent(node.content).ok() && hasValidAuthor(node) &&
-                           hasValidSchemaVersion(node);
+  bool structurallyValid = isValidCollection(node.collection) && isValidKind(node.kind) &&
+                           hasValidIdentifiers(node) && hasValidParentage(node) && hasValidLinks(node) &&
+                           parseContent(node.content).ok() && hasValidAuthor(node) && hasValidSchemaVersion(node);
   if (!structurallyValid) {
     return Status::Malformed;
   }
   return Status::Ok;
 }
 
-Bytes nodeKeyWrapAad(std::string_view id, const std::optional<std::string>& parentId, uint32_t epoch,
-                     uint32_t parentEpoch) {
-  return TlvWriter("nw-node-key-v1").text(id).optionalText(parentId).u32(epoch).u32(parentEpoch).finish();
+Bytes nodeKeyWrapAad(std::string_view id, const std::optional<std::string>& parentId) {
+  return TlvWriter("nw-node-key-v2").text(id).optionalText(parentId).finish();
 }
 
-Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, uint32_t epoch, uint64_t baseSeq,
-               bool deleted) {
-  return TlvWriter("nw-node-content-v2")
+Bytes facetAad(std::string_view id, std::string_view collection, uint32_t tag, uint64_t baseSeq, bool deleted) {
+  return TlvWriter("nw-node-content-v3")
       .text(id)
       .text(collection)
       .u32(tag)
-      .u32(epoch)
       .u64(baseSeq)
       .flag(deleted)
       .finish();
@@ -340,19 +368,18 @@ SymmetricKey objectKey(const SymmetricKey& fileKey, std::string_view objectId) {
 }
 
 Bytes wrapNodeKey(const SymmetricKey& parentKey, const SymmetricKey& nodeKey, std::string_view id,
-                  const std::optional<std::string>& parentId, uint32_t epoch, uint32_t parentEpoch) {
-  return aeadEncrypt(parentKey, nodeKey.view(), nodeKeyWrapAad(id, parentId, epoch, parentEpoch));
+                  const std::optional<std::string>& parentId) {
+  return aeadEncrypt(parentKey, nodeKey.view(), nodeKeyWrapAad(id, parentId));
 }
 
 Result<SymmetricKey> unwrapNodeKey(const SymmetricKey& parentKey, ByteView wrappedKey, std::string_view id,
-                                   const std::optional<std::string>& parentId, uint32_t epoch,
-                                   uint32_t parentEpoch) {
-  return aeadDecryptKey(parentKey, wrappedKey, nodeKeyWrapAad(id, parentId, epoch, parentEpoch));
+                                   const std::optional<std::string>& parentId) {
+  return aeadDecryptKey(parentKey, wrappedKey, nodeKeyWrapAad(id, parentId));
 }
 
 Bytes encryptFacet(const SymmetricKey& facetKeyValue, std::string_view id, std::string_view collection,
-                   uint32_t tag, uint32_t epoch, uint64_t baseSeq, bool deleted, ByteView plaintext) {
-  Bytes associatedData = facetAad(id, collection, tag, epoch, baseSeq, deleted);
+                   uint32_t tag, uint64_t baseSeq, bool deleted, ByteView plaintext) {
+  Bytes associatedData = facetAad(id, collection, tag, baseSeq, deleted);
   return aeadEncrypt(facetKeyValue, pad(plaintext), associatedData);
 }
 
@@ -365,7 +392,7 @@ Result<Bytes> decryptFacet(const SymmetricKey& facetKeyValue, const Node& node, 
   if (found == facets.value().end()) {
     return Status::NotFound;
   }
-  Bytes associatedData = facetAad(node.id, node.collection, tag, node.epoch, node.baseSeq, node.deleted);
+  Bytes associatedData = facetAad(node.id, node.collection, tag, node.baseSeq, node.deleted);
   Result<Bytes> padded = aeadDecrypt(facetKeyValue, found->second, associatedData);
   if (!padded.ok()) {
     return padded.status();
@@ -376,8 +403,8 @@ Result<Bytes> decryptFacet(const SymmetricKey& facetKeyValue, const Node& node, 
 void sealContent(Node& node, const SymmetricKey& nodeKey, const FacetMap& plaintexts) {
   FacetMap ciphertexts;
   for (const auto& [tag, plaintext] : plaintexts) {
-    ciphertexts.emplace(tag, encryptFacet(facetKey(nodeKey, tag), node.id, node.collection, tag, node.epoch,
-                                          node.baseSeq, node.deleted, plaintext));
+    ciphertexts.emplace(tag, encryptFacet(facetKey(nodeKey, tag), node.id, node.collection, tag, node.baseSeq,
+                                          node.deleted, plaintext));
   }
   node.content = assembleContent(ciphertexts);
 }
@@ -415,36 +442,25 @@ Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_v
   return aeadDecrypt(objectKeyValue, boxed, blobChunkAad(objectId, index, finalChunk));
 }
 
-namespace {
-
-TlvWriter nodeWriteFields(const Node& node, const char* context) {
+Bytes nodeWriteMessage(const Node& node) {
   Bytes wrappedKeyBytes;
   if (node.wrappedKey.has_value()) {
     wrappedKeyBytes = *node.wrappedKey;
   }
-  TlvWriter writer(context);
-  writer.text(node.id)
+  return TlvWriter("nw-node-write-v4")
+      .text(node.id)
       .optionalText(node.parentId)
       .text(node.collection)
       .text(node.kind)
-      .u32(node.epoch)
+      .optionalText(node.table)
       .u64(node.baseSeq)
       .flag(node.deleted)
-      .optionalText(node.targetId)
-      .optionalText(node.targetRole)
       .bytes(hash(wrappedKeyBytes))
       .bytes(hash(node.content))
-      .bytes(hash(canonicalFilesBytes(node.files)));
-  return writer;
-}
-
-}  // namespace
-
-Bytes nodeWriteMessage(const Node& node) {
-  if (!node.schemaVersion.has_value()) {
-    return nodeWriteFields(node, "nw-node-write-v3").finish();
-  }
-  return nodeWriteFields(node, "nw-node-write-v4").text(*node.schemaVersion).finish();
+      .bytes(hash(canonicalFilesBytes(node.files)))
+      .bytes(hash(canonicalLinksBytes(node.links)))
+      .optionalText(node.schemaVersion)
+      .finish();
 }
 
 Status signNodeWrite(ByteView signSecret, Node& node) {

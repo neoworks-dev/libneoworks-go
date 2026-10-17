@@ -247,7 +247,25 @@ Status Client::appendVerifiedEntries(const std::string& nodeId, std::vector<Acce
   return database_->appendChainEntries(nodeId, accepted);
 }
 
+// A revocation of this holder's own grant only takes access away, so it is kept even before the
+// chain is readable: the row usually is not, once the grant is gone.
+Status Client::acceptPulledRevocation(const AccessGrant& grant) {
+  std::vector<AccessLogEntry> chain = database_->chainOf(grant.nodeId);
+  bool addressedToMe = grant.principalType == signer_.authorType && grant.principalId == signer_.authorId;
+  bool covered = grant.logIndex < chain.size();
+  if (!covered && !addressedToMe) {
+    return Status::NotFound;
+  }
+  if (covered && !entryMatchesRevocation(chain[static_cast<size_t>(grant.logIndex)], grant)) {
+    return integrityFailed(*database_, grant.nodeId, "revoked grant does not match its log entry");
+  }
+  return database_->putGrant(grant);
+}
+
 Status Client::acceptPulledGrant(const AccessGrant& grant) {
+  if (grant.revokedAt.has_value()) {
+    return acceptPulledRevocation(grant);
+  }
   std::vector<AccessLogEntry> chain = database_->chainOf(grant.nodeId);
   if (grant.logIndex >= chain.size()) {
     return Status::NotFound;
@@ -260,7 +278,7 @@ Status Client::acceptPulledGrant(const AccessGrant& grant) {
     return stored;
   }
   bool addressedToMe = grant.principalType == signer_.authorType && grant.principalId == signer_.authorId;
-  if (addressedToMe && !grant.revokedAt.has_value()) {
+  if (addressedToMe) {
     keyring_.addGrant(grant, encPub_, encSecret_.view());
     indexPendingNodes();
   }

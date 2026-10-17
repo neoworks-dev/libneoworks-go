@@ -186,6 +186,9 @@ std::optional<FieldType> filterableType(const FieldDescriptor& field) {
   if (field.value.kind == ValueKind::Decimal) {
     return FieldType::Decimal;
   }
+  if (field.value.kind == ValueKind::Reference) {
+    return FieldType::Identifier;
+  }
   if (field.value.kind == ValueKind::Scalar) {
     return scalarType(field.value.scalar);
   }

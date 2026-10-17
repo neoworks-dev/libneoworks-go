@@ -25,9 +25,9 @@ ByteView previousFacet(const FacetMap& previous, uint32_t tag) {
   return found->second;
 }
 
-void keepUnknownFacets(const NodeDescriptor& node, const FacetMap& previous, FacetMap& plaintexts) {
+void keepUnknownFacets(const TableDescriptor& table, const FacetMap& previous, FacetMap& plaintexts) {
   for (const auto& [tag, plaintext] : previous) {
-    if (node.facetByTag(tag) == nullptr) {
+    if (table.facetByTag(tag) == nullptr) {
       plaintexts.emplace(tag, plaintext);
     }
   }
@@ -39,26 +39,26 @@ std::set<uint32_t> facetFieldSet(const FacetDescriptor& facet) {
   return std::set<uint32_t>(facet.fields.begin(), facet.fields.end());
 }
 
-Result<FacetMap> encodeContent(const NodeDescriptor& node, const Json& object, const FacetMap& previous,
+Result<FacetMap> encodeContent(const TableDescriptor& table, const Json& object, const FacetMap& previous,
                                bool keepMissing, CodecError& error) {
   error = CodecError{};
   if (!object.is_object()) {
     error.status = Status::InvalidArgument;
-    error.path = node.model->name;
+    error.path = table.model->name;
     error.reason = "expected an object";
     return Status::InvalidArgument;
   }
-  if (!rejectUnknownNames(*node.model, object, error)) {
+  if (!rejectUnknownNames(*table.model, object, error)) {
     return Status::InvalidArgument;
   }
   FacetMap plaintexts;
-  for (const FacetDescriptor& facet : node.facets) {
+  for (const FacetDescriptor& facet : table.facets) {
     std::set<uint32_t> fields = facetFieldSet(facet);
     EncodeOptions options;
     options.fields = &fields;
     options.previous = previousFacet(previous, facet.tag);
     options.keepMissing = keepMissing;
-    Result<Bytes> encoded = encodeMessage(*node.model, object, options, error);
+    Result<Bytes> encoded = encodeMessage(*table.model, object, options, error);
     if (!encoded.ok()) {
       return encoded.status();
     }
@@ -66,17 +66,17 @@ Result<FacetMap> encodeContent(const NodeDescriptor& node, const Json& object, c
       plaintexts.emplace(facet.tag, encoded.take());
     }
   }
-  keepUnknownFacets(node, previous, plaintexts);
+  keepUnknownFacets(table, previous, plaintexts);
   return plaintexts;
 }
 
-Result<FacetMap> readableFacets(const Node& node, const NodeDescriptor& descriptor, const FacetKeyResolver& keyFor) {
+Result<FacetMap> readableFacets(const Node& node, const TableDescriptor& table, const FacetKeyResolver& keyFor) {
   Result<FacetMap> stored = parseContent(node.content);
   if (!stored.ok()) {
     return stored.status();
   }
   FacetMap readable;
-  for (const FacetDescriptor& facet : descriptor.facets) {
+  for (const FacetDescriptor& facet : table.facets) {
     Result<SymmetricKey> key = keyFor(facet.tag);
     if (!key.ok()) {
       continue;
@@ -94,16 +94,16 @@ Result<FacetMap> readableFacets(const Node& node, const NodeDescriptor& descript
   return readable;
 }
 
-Result<Json> decodeContent(const NodeDescriptor& node, const FacetMap& readable, CodecError& error) {
+Result<Json> decodeContent(const TableDescriptor& table, const FacetMap& readable, CodecError& error) {
   error = CodecError{};
   Json merged = Json::object();
-  for (const FacetDescriptor& facet : node.facets) {
+  for (const FacetDescriptor& facet : table.facets) {
     auto found = readable.find(facet.tag);
     if (found == readable.end()) {
       continue;
     }
     std::set<uint32_t> fields = facetFieldSet(facet);
-    Result<Json> decoded = decodeMessage(*node.model, found->second, &fields, error);
+    Result<Json> decoded = decodeMessage(*table.model, found->second, &fields, error);
     if (!decoded.ok()) {
       return decoded.status();
     }

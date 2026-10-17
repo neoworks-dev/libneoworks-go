@@ -133,22 +133,12 @@ const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal) {
   return &found->second;
 }
 
-Truth parentIdTruth(const FieldTest& test, const IndexedNode& node) {
-  if (!node.parentId.has_value()) {
-    return testTruth(test, nullptr);
-  }
-  Comparable parentId;
-  parentId.kind = Comparable::Kind::Text;
-  parentId.text = *node.parentId;
-  return testTruth(test, &parentId);
-}
+Truth conditionTruth(const Condition& condition, const IndexedNode& node);
 
-Truth conditionTruth(const Condition& condition, const IndexedNode& node, const IndexedNode* parent);
-
-Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
+Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node) {
   Truth combined = Truth::True;
   for (const Condition& child : conditions) {
-    Truth truth = conditionTruth(child, node, parent);
+    Truth truth = conditionTruth(child, node);
     if (truth == Truth::False) {
       return Truth::False;
     }
@@ -159,10 +149,10 @@ Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node
   return combined;
 }
 
-Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node, const IndexedNode* parent) {
+Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node) {
   Truth combined = Truth::False;
   for (const Condition& child : conditions) {
-    Truth truth = conditionTruth(child, node, parent);
+    Truth truth = conditionTruth(child, node);
     if (truth == Truth::True) {
       return Truth::True;
     }
@@ -173,27 +163,16 @@ Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node
   return combined;
 }
 
-Truth parentIsTruth(const Condition& condition, const IndexedNode* parent) {
-  if (parent == nullptr) {
-    return Truth::False;
-  }
-  return conditionTruth(condition.children.front(), *parent, nullptr);
-}
-
-Truth conditionTruth(const Condition& condition, const IndexedNode& node, const IndexedNode* parent) {
+Truth conditionTruth(const Condition& condition, const IndexedNode& node) {
   switch (condition.type) {
     case Condition::Type::All:
-      return allTruth(condition.children, node, parent);
+      return allTruth(condition.children, node);
     case Condition::Type::Any:
-      return anyTruth(condition.children, node, parent);
+      return anyTruth(condition.children, node);
     case Condition::Type::Not:
-      return negated(conditionTruth(condition.children.front(), node, parent));
+      return negated(conditionTruth(condition.children.front(), node));
     case Condition::Type::Field:
       return testTruth(condition.test, valueOf(node, condition.test.ordinal));
-    case Condition::Type::ParentId:
-      return parentIdTruth(condition.test, node);
-    case Condition::Type::ParentIs:
-      return parentIsTruth(condition, parent);
   }
   return Truth::False;
 }
@@ -222,19 +201,32 @@ bool sortsBefore(const std::vector<OrderKey>& keys, const IndexedNode& left, con
   return false;
 }
 
+// The row a single reference names, when it is live and readable here.
+std::optional<std::string> includedRow(const FieldIndex& index, const IndexedNode& node, uint32_t ordinal) {
+  for (const IndexedReference& reference : node.references) {
+    if (reference.fieldOrdinal == ordinal && index.contains(reference.rowId)) {
+      return reference.rowId;
+    }
+  }
+  return std::nullopt;
+}
+
+std::vector<std::pair<std::string, std::optional<std::string>>> includedRows(const Query& query, const FieldIndex& index,
+                                                                             const IndexedNode& node) {
+  std::vector<std::pair<std::string, std::optional<std::string>>> included;
+  for (const IncludedField& field : query.include) {
+    included.emplace_back(field.name, includedRow(index, node, field.ordinal));
+  }
+  return included;
+}
+
 }  // namespace
 
-std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, const std::string& collection) {
+std::vector<QueryRow> runQuery(const Query& query, const FieldIndex& index, const std::string& collection,
+                               const std::string& table) {
   std::vector<std::pair<const std::string*, const IndexedNode*>> hits;
   for (const auto& [nodeId, node] : index.nodesOf(collection)) {
-    const IndexedNode* parent = nullptr;
-    if (node.kind != "item") {
-      continue;
-    }
-    if (node.parentId.has_value()) {
-      parent = index.find(collection, *node.parentId);
-    }
-    if (conditionTruth(query.where, node, parent) == Truth::True) {
+    if (node.table == table && conditionTruth(query.where, node) == Truth::True) {
       hits.emplace_back(&nodeId, &node);
     }
   }
@@ -245,11 +237,11 @@ std::vector<std::string> runQuery(const Query& query, const FieldIndex& index, c
   if (query.take.has_value()) {
     count = std::min(count, *query.take);
   }
-  std::vector<std::string> ids;
+  std::vector<QueryRow> rows;
   for (size_t position = 0; position < count; ++position) {
-    ids.push_back(*hits[position].first);
+    rows.push_back(QueryRow{*hits[position].first, includedRows(query, index, *hits[position].second)});
   }
-  return ids;
+  return rows;
 }
 
 }  // namespace nw

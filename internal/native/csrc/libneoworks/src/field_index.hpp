@@ -28,26 +28,26 @@ struct Comparable {
 // Negative, zero or positive as `left` sorts before, equal to or after `right`.
 int compareValues(const Comparable& left, const Comparable& right);
 
-// The set fields of one node by field ordinal. Unset and null fields are absent.
+// The set fields of one row by field ordinal. Unset and null fields are absent.
 using FieldValues = std::map<uint32_t, Comparable>;
 
 struct IndexedReference {
   uint32_t fieldOrdinal = 0;
-  std::string nodeId;
+  std::string rowId;
 };
 
 struct IndexedNode {
-  std::string kind;
-  std::optional<std::string> parentId;
+  // The row's table, by model name.
+  std::string table;
   FieldValues values;
   // Lowercased texts of the @neoworks.searchable fields.
   std::vector<std::string> searchTexts;
-  // The nodes its content refers to.
+  // The rows its content refers to.
   std::vector<IndexedReference> references;
 };
 
-// The filterable values of every node this holder can read, per collection. Only values live
-// here, never ciphertext, and nothing is written to disk.
+// The filterable values of every live row this holder can read, per collection. Only values
+// live here, never ciphertext, and nothing is written to disk.
 class FieldIndex {
  public:
   void put(const std::string& collection, const std::string& nodeId, IndexedNode entry);

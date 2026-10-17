@@ -182,7 +182,7 @@ Result<std::vector<NodeFile>> collectFiles(const ModelDescriptor& model, const J
   return files;
 }
 
-Result<std::vector<NodeFile>> filesOfFacets(const NodeDescriptor& descriptor, const FacetMap& plaintexts,
+Result<std::vector<NodeFile>> filesOfFacets(const TableDescriptor& descriptor, const FacetMap& plaintexts,
                                             CodecError& error) {
   Result<Json> content = decodeContent(descriptor, plaintexts, error);
   if (!content.ok()) {
@@ -197,7 +197,7 @@ Result<std::vector<NodeFile>> filesOfFacets(const NodeDescriptor& descriptor, co
   return files;
 }
 
-Status checkNodeFiles(const NodeDescriptor& descriptor, const Node& node, const Json& content) {
+Status checkNodeFiles(const TableDescriptor& descriptor, const Node& node, const Json& content) {
   Result<std::vector<NodeFile>> seen = collectFiles(*descriptor.model, content);
   if (!seen.ok() || !isSubsetOf(seen.value(), node.files)) {
     return Status::IntegrityFailure;

@@ -1,12 +1,11 @@
 #include "client.hpp"
+#include "files.hpp"
 #include "query_fields.hpp"
 #include "references.hpp"
 
 namespace nw {
 
 namespace {
-
-constexpr int kMaxAncestorWalk = 64;
 
 // A string is indexed as it is, a File by its name.
 void addSearchText(const Json& value, std::vector<std::string>& texts) {
@@ -29,7 +28,7 @@ void collectSearchTexts(const Json& value, std::vector<std::string>& texts) {
   }
 }
 
-std::vector<std::string> searchTextsOf(const NodeDescriptor& descriptor, const Json& content) {
+std::vector<std::string> searchTextsOf(const TableDescriptor& descriptor, const Json& content) {
   std::vector<std::string> texts;
   for (uint32_t ordinal : descriptor.searchable) {
     const FieldDescriptor* field = descriptor.model->fieldByOrdinal(ordinal);
@@ -41,14 +40,14 @@ std::vector<std::string> searchTextsOf(const NodeDescriptor& descriptor, const J
   return texts;
 }
 
-IndexedNode indexedNodeOf(const Node& node, const NodeDescriptor& descriptor, const Json& content) {
+// `content` as an app sees it: Files without keys and references as ids.
+IndexedNode indexedNodeOf(const TableDescriptor& descriptor, const Json& content) {
   IndexedNode entry;
-  entry.kind = node.kind;
-  entry.parentId = node.parentId;
+  entry.table = descriptor.modelName;
   entry.values = fieldValuesOf(*descriptor.model, content);
   entry.searchTexts = searchTextsOf(descriptor, content);
   for (const ContentReference& reference : collectReferences(*descriptor.model, content)) {
-    entry.references.push_back(IndexedReference{reference.fieldOrdinal, reference.nodeId});
+    entry.references.push_back(IndexedReference{reference.fieldOrdinal, reference.rowId});
   }
   return entry;
 }
@@ -70,98 +69,68 @@ void Client::attachIndex() {
 
 void Client::onNodeChanged(const std::string& nodeId) {
   indexNode(nodeId);
-  const Node* node = database_->findNode(nodeId);
-  if (node != nullptr && node->kind != "item") {
-    indexPendingNodes();
+  indexDependentsOf(nodeId);
+}
+
+// A row that became readable unlocks the pending rows belonging to it and the rows it links to.
+void Client::indexDependentsOf(const std::string& nodeId) {
+  std::vector<std::string> unlocked{nodeId};
+  while (!unlocked.empty()) {
+    std::string unlockedId = unlocked.back();
+    unlocked.pop_back();
+    for (const std::string& dependentId : dependentsOf(unlockedId)) {
+      if (unindexedNodeIds_.count(dependentId) == 0) {
+        continue;
+      }
+      indexNode(dependentId);
+      if (unindexedNodeIds_.count(dependentId) == 0) {
+        unlocked.push_back(dependentId);
+      }
+    }
   }
 }
 
-// Revoked grants are the only change that takes nodes out of view without touching the nodes.
+std::vector<std::string> Client::dependentsOf(const std::string& nodeId) const {
+  std::vector<std::string> dependents = database_->childrenOf(nodeId);
+  const Node* node = database_->findNode(nodeId);
+  if (node != nullptr) {
+    dependents.insert(dependents.end(), node->links.begin(), node->links.end());
+  }
+  return dependents;
+}
+
 void Client::onGrantChanged(const std::string& nodeId) {
-  const Node* node = database_->findNode(nodeId);
-  if (node == nullptr) {
-    return;
-  }
-  if (ownGrantsOn(nodeId) == OwnGrants::Revoked) {
-    evictNodesOutOfView(node->collection);
+  if (hasRevokedOwnGrant(nodeId)) {
+    ownGrantRevoked_ = true;
   }
 }
 
-// Whether this holder has an unrevoked grant on the node itself, only revoked ones, or none.
-Client::OwnGrants Client::ownGrantsOn(const std::string& nodeId) const {
-  OwnGrants state = OwnGrants::None;
+bool Client::hasRevokedOwnGrant(const std::string& nodeId) const {
   for (const AccessGrant& grant : database_->grantsForNode(nodeId)) {
-    if (!isAddressedTo(grant, signer_.authorType, signer_.authorId)) {
-      continue;
-    }
-    if (!grant.revokedAt.has_value()) {
-      return OwnGrants::Active;
-    }
-    state = OwnGrants::Revoked;
-  }
-  return state;
-}
-
-bool Client::holderLostView(const Node& node) const {
-  bool sawRevokedGrant = false;
-  const Node* cursor = &node;
-  for (int step = 0; step < kMaxAncestorWalk && cursor != nullptr; ++step) {
-    OwnGrants grants = ownGrantsOn(cursor->id);
-    if (grants == OwnGrants::Active) {
-      return false;
-    }
-    sawRevokedGrant = sawRevokedGrant || grants == OwnGrants::Revoked;
-    if (!cursor->parentId.has_value()) {
-      break;
-    }
-    cursor = database_->findNode(*cursor->parentId);
-  }
-  return sawRevokedGrant && effectiveRole(node.id).empty();
-}
-
-void Client::evictNodesOutOfView(const std::string& collection) {
-  std::vector<std::string> lost;
-  for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
-    const Node* node = database_->findNode(nodeId);
-    if (node != nullptr && holderLostView(*node)) {
-      lost.push_back(nodeId);
+    if (isAddressedTo(grant, signer_.authorType, signer_.authorId) && grant.revokedAt.has_value()) {
+      return true;
     }
   }
-  for (const std::string& nodeId : lost) {
-    index_.erase(nodeId);
-    unindexedNodeIds_.erase(nodeId);
-  }
+  return false;
 }
 
 Result<IndexedNode> Client::indexEntryFor(const Node& node) {
-  if (node.kind == "root") {
-    IndexedNode root;
-    root.kind = node.kind;
-    return root;
+  Result<StoredContent> stored = readStoredContent(node, nullptr);
+  if (!stored.ok()) {
+    return stored.status();
   }
-  if (holderLostView(node)) {
-    return Status::Forbidden;
-  }
-  const SchemaDescriptor* schema = descriptorFor(node.collection);
-  const NodeDescriptor* descriptor = nullptr;
-  if (schema != nullptr) {
-    descriptor = schema->nodeByKind(node.kind);
-  }
-  if (descriptor == nullptr) {
-    return Status::InvalidState;
-  }
-  Result<Json> content = readContent(node, nullptr);
-  if (!content.ok()) {
-    return content.status();
-  }
-  return indexedNodeOf(node, *descriptor, content.value());
+  const TableDescriptor& table = *stored.value().table;
+  Json& content = stored.value().content;
+  removeFileKeys(*table.model, content);
+  removeReferenceKeys(*table.model, content);
+  return indexedNodeOf(table, content);
 }
 
 // A node that cannot be read yet stays pending and is tried again once keys, grants,
 // ancestors or the collection's descriptor arrive.
 void Client::indexNode(const std::string& nodeId) {
   const Node* node = database_->findNode(nodeId);
-  if (node == nullptr || node->deleted || isShortcut(*node)) {
+  if (node == nullptr || node->deleted || isRoot(*node)) {
     index_.erase(nodeId);
     unindexedNodeIds_.erase(nodeId);
     return;
@@ -175,7 +144,7 @@ void Client::indexNode(const std::string& nodeId) {
     return;
   }
   index_.erase(nodeId);
-  if (entry.status() == Status::Forbidden || entry.status() == Status::IntegrityFailure) {
+  if (entry.status() == Status::IntegrityFailure) {
     unindexedNodeIds_.erase(nodeId);
     return;
   }
@@ -193,6 +162,54 @@ void Client::resetIndexOf(const std::string& collection) {
   index_.eraseCollection(collection);
   for (const std::string& nodeId : database_->nodesInCollection(collection)) {
     unindexedNodeIds_.insert(nodeId);
+  }
+}
+
+// Every row reached from this holder's active grants: a whole-row grant reaches the rows belonging
+// to the row and the rows it links to, a grant on some facets only the row itself.
+std::set<std::string> Client::rowsInReach() const {
+  std::set<std::string> reached;
+  std::vector<std::string> queue;
+  for (const AccessGrant& grant : database_->allGrants()) {
+    bool active = isAddressedTo(grant, signer_.authorType, signer_.authorId) && !grant.revokedAt.has_value();
+    if (active && grant.facets.has_value()) {
+      reached.insert(grant.nodeId);
+    }
+    if (active && !grant.facets.has_value()) {
+      queue.push_back(grant.nodeId);
+    }
+  }
+  std::set<std::string> expanded;
+  while (!queue.empty()) {
+    std::string nodeId = queue.back();
+    queue.pop_back();
+    if (!expanded.insert(nodeId).second) {
+      continue;
+    }
+    reached.insert(nodeId);
+    std::vector<std::string> children = database_->childrenOf(nodeId);
+    queue.insert(queue.end(), children.begin(), children.end());
+    const Node* node = database_->findNode(nodeId);
+    if (node != nullptr) {
+      queue.insert(queue.end(), node->links.begin(), node->links.end());
+    }
+  }
+  return reached;
+}
+
+void Client::removeRowsOutOfReach() {
+  if (!ownGrantRevoked_) {
+    return;
+  }
+  ownGrantRevoked_ = false;
+  std::set<std::string> reached = rowsInReach();
+  for (const std::string& nodeId : database_->allNodeIds()) {
+    const LocalNode* local = database_->findLocal(nodeId);
+    if (reached.count(nodeId) > 0 || local->dirty) {
+      continue;
+    }
+    keyring_.forgetNode(nodeId);
+    database_->removeNode(nodeId);
   }
 }
 

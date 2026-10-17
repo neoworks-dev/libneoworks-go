@@ -15,26 +15,24 @@
 #include "http.hpp"
 #include "install.hpp"
 #include "keyring.hpp"
+#include "query.hpp"
 #include "schema_codec.hpp"
 
 namespace nw {
 
 struct CreateNodeRequest {
-  std::optional<std::string> parentId;
   std::string collection;
-  std::string kind;
-  // A JSON object of the collection's model for `kind`. Roots carry no content. The `File` values
-  // in it name the storage objects the app uploads once the node is pushed; the core lists them
-  // on the node.
+  // "root" for the collection's root, which only an account creates and which carries no
+  // content, or "row".
+  std::string kind = "row";
+  // The row's table, by model name.
+  std::string table;
+  // A JSON object of the table's model. A reference is the id of a row; the core keeps that row's
+  // key beside it and lists the row on the new one. The @belongsTo field names the row this one
+  // belongs to; without it the row sits under this holder's root of the collection. The `File`
+  // values name the storage objects the app uploads once the row is pushed; the core lists them
+  // on the row.
   Json content = Json::object();
-};
-
-// An item under `parentId` that opens `targetId`, an item of the same collection, for
-// whoever can open the parent: with at most `targetRole` ("read" or "write").
-struct CreateShortcutRequest {
-  std::string parentId;
-  std::string targetId;
-  std::string targetRole;
 };
 
 struct UpdateNodeRequest {
@@ -51,13 +49,9 @@ struct ShareRequest {
   std::string principalType;
   std::string principalId;
   std::string role;
-  // Absent: the whole node and its subtree.
+  // Absent: the whole row, the rows belonging to it and the rows they link to.
   std::optional<std::vector<uint32_t>> facets;
   Bytes principalEncPub;
-};
-
-struct RotationReport {
-  std::vector<std::string> rotatedNodeIds;
 };
 
 struct LinkRecord {
@@ -135,16 +129,20 @@ class Client {
   const CodecError& lastContentError() const { return lastContentError_; }
 
   Result<std::string> createNode(const CreateNodeRequest& request);
-  Result<std::string> createShortcut(const CreateShortcutRequest& request);
+  // A given field replaces the stored value; the @belongsTo field cannot change.
   Status updateNode(const UpdateNodeRequest& request);
-  Status deleteNode(const std::string& nodeId, bool recursive);
+  // Deletes the row, the rows belonging to it, and the rows linking to it through an
+  // @onDelete("cascade") reference that this holder may write.
+  Status deleteNode(const std::string& nodeId);
   // Re-signs the local pending edit on top of a newer server version (last-writer-wins).
   Status rebaseLocalNode(const std::string& nodeId, const Node& remote);
-  // The fields of the facets this client can open. Roots and shortcuts read as {}.
-  // NotFound: no such node or no facet can be opened.
+  // The fields of the facets this client can open; a reference reads as the id of its row. Roots
+  // read as {}. NotFound: no such node or no facet can be opened.
   Result<Json> readNode(const std::string& nodeId);
+  // The table of a row, by model name; nullopt for roots and rows this holder does not have.
+  std::optional<std::string> tableOf(const std::string& nodeId) const;
   // Decrypts a version (the JSON object of GET /nodes/{id}/versions) of a node this client
-  // knows, with the key of the version's epoch. NotFound: the node or that epoch's key is not
+  // knows, with the node key. NotFound: the node or its key is not
   // available here. AuthenticationFailed: the signature does not verify or the content does not
   // decrypt. A version whose author cannot be checked offline is unverified.
   Result<VersionRead> readVersion(const Json& version);
@@ -155,40 +153,44 @@ class Client {
   Result<SymmetricKey> resolveFileKey(const std::string& nodeId, const std::string& objectId);
   NodeLookup nodeLookup() const;
 
-  // Role this principal holds on the node: own grants on the node or an ancestor, and
-  // through shortcuts to it, capped by certificate scopes. Empty string when none.
+  // Role this principal holds on the row: owned, granted on the row or a row it belongs to, and
+  // read through a row linking to it, capped by certificate scopes. Empty string when none.
   std::string effectiveRole(const std::string& nodeId) const;
 
-  // The ids of the items of `collection` matching `query`, a Prisma-style
-  // `{ where, orderBy, take }` (see query.hpp), read from the in-memory index of the values of
-  // every node this holder could open; nothing is decrypted. Only items are returned: containers
-  // are indexed so that `where.parent.is` can filter on their fields. Fields are those of the
-  // schema's item model. InvalidState: no confirmed descriptor for the collection.
-  // InvalidArgument: the query does not fit the schema, see lastContentError.
-  Result<std::vector<std::string>> query(const std::string& collection, const Json& query);
+  // The rows of `table` in `collection` matching `query`, a Prisma-style
+  // `{ where, orderBy, take, include }` (see query.hpp), read from the in-memory index of the
+  // values of every row this holder could open; nothing is decrypted. InvalidState: no confirmed
+  // descriptor for the collection. InvalidArgument: the query does not fit the table, see
+  // lastContentError.
+  Result<std::vector<QueryRow>> query(const std::string& collection, const std::string& table, const Json& query);
 #if defined(NW_ENABLE_TEST_HOOKS)
   // How many times a node's content was decrypted for reading, by the index or by readNode.
   size_t contentDecryptions() const { return contentDecryptions_; }
 #endif
 
-  // Items whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in epoch
+  // Rows of `table` whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in Unix epoch
   // milliseconds.
-  std::vector<std::string> queryRange(const std::string& collection, int64_t rangeStart, int64_t rangeEnd);
-  // Items whose @neoworks.searchable fields contain `needle`, case-insensitively.
-  std::vector<std::string> search(const std::string& collection, const std::string& needle);
+  std::vector<std::string> queryRange(const std::string& collection, const std::string& table, int64_t rangeStart,
+                                      int64_t rangeEnd);
+  // Rows of `table` whose @neoworks.searchable fields contain `needle`, case-insensitively.
+  std::vector<std::string> search(const std::string& collection, const std::string& table, const std::string& needle);
 
   // Sharing: the owner, or an install holding `<collection>:share` for the owner. Grants and
   // revocations are queued as intents and signed into the access log when sent.
   Result<AccessGrant> shareNode(const ShareRequest& request);
-  // Removes the principal's grant and gives the node a new key, so the removed principal cannot read
-  // later writes. Records below it move to a new key at their own next write.
-  Result<RotationReport> revokeAccess(const std::string& nodeId, const std::string& principalType,
-                                      const std::string& principalId);
-  // Link shares: the fragment key is base64url(u32be epoch || node key).
+  // Removes the principal's grant. No key changes: the server stops sending the rows, and the
+  // principal's next pull removes those it reached only through the grant.
+  Status revokeAccess(const std::string& nodeId, const std::string& principalType, const std::string& principalId);
+  // Link shares: the fragment key is base64url(node key).
   Result<std::string> createLinkFragment(const std::string& nodeId);
   Status recordLink(const std::string& nodeId, const std::string& linkId);
   std::vector<LinkRecord> linksFor(const std::string& nodeId) const;
-  Result<RotationReport> revokeLink(const std::string& linkId);
+  Status revokeLink(const std::string& linkId);
+
+  // After one of this holder's own grants was revoked: removes every row it no longer reaches
+  // from its active grants, following the rows that belong to a reached row and the rows it links
+  // to. Rows with a local edit stay. Does nothing when no own grant was revoked since the last call.
+  void removeRowsOutOfReach();
 
   // Identity pinning and safety codes.
   // `history` is the server's identity key history for the user (amendment 4). With it, a
@@ -251,36 +253,58 @@ class Client {
 
   Client() = default;
 
-  // The in-memory index of readable field values. A node is read into it when it is stored or
+  // The in-memory index of readable field values. A row is read into it when it is stored or
   // removed in the database, and again when keys, grants or descriptors that unlock it arrive.
   void attachIndex();
   void onNodeChanged(const std::string& nodeId);
   void onGrantChanged(const std::string& nodeId);
   void indexNode(const std::string& nodeId);
+  void indexDependentsOf(const std::string& nodeId);
+  std::vector<std::string> dependentsOf(const std::string& nodeId) const;
   void indexPendingNodes();
   void resetIndexOf(const std::string& collection);
-  void evictNodesOutOfView(const std::string& collection);
-  enum class OwnGrants { None, Revoked, Active };
-  OwnGrants ownGrantsOn(const std::string& nodeId) const;
-  bool holderLostView(const Node& node) const;
   Result<IndexedNode> indexEntryFor(const Node& node);
-  Status attachToParent(Node& node, const SymmetricKey& nodeKey);
-  // The node descriptor for content of `kind` in `collection`; records the reason on failure.
-  Result<const NodeDescriptor*> nodeDescriptorFor(const std::string& collection, const std::string& kind);
-  // The content as an app sees it: Files without their keys.
+  bool hasRevokedOwnGrant(const std::string& nodeId) const;
+  Status acceptPulledRevocation(const AccessGrant& grant);
+  std::set<std::string> rowsInReach() const;
+
+  // A row's content as stored, Files and references with their keys, and the table it names.
+  struct StoredContent {
+    const TableDescriptor* table = nullptr;
+    Json content;
+  };
+  // The table `table` of `collection`; records the reason on failure.
+  Result<const TableDescriptor*> tableDescriptorFor(const std::string& collection, const std::string& table);
+  // The stored content of the facets this holder can open, or all facets with `nodeKey`.
+  Result<StoredContent> readStoredContent(const Node& node, const SymmetricKey* nodeKey);
+  // The content as an app sees it: Files without their keys and references as ids.
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
-  // The content as stored, Files with their keys.
-  Result<Json> readStoredContent(const Node& node, const SymmetricKey* nodeKey);
-  // The facet plaintexts of a node to create; roots have none.
-  Result<FacetMap> encodeNewContent(const CreateNodeRequest& request);
   // `changes` with a key in every File value: the stored one when `stored` holds the File, else a
   // new one.
-  Result<Json> withFileKeys(const NodeDescriptor& descriptor, const Json& changes, const FacetMap& stored);
-  // The plain file list for facets about to be sealed into a node of `kind`; empty for nodes
-  // without content.
-  Result<std::vector<NodeFile>> filesOfContent(const std::string& collection, const std::string& kind,
-                                               const FacetMap& plaintexts);
+  Result<Json> withFileKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored);
+  // `changes` with the keys of the files and of the referenced rows in it.
+  Result<Json> withKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored);
+  // The key of `rowId` for a reference to it from a new write: a live row this holder can read, of
+  // the table `table` names.
+  Result<SymmetricKey> referencedRowKey(const std::string& rowId, const std::string& table);
+  // The key of `target` as a row linking to it carries it.
+  Result<SymmetricKey> keyThroughLinks(const Node& target);
+  // Sets the row's file list and links from the facets about to be sealed into it.
+  Status describeContent(const TableDescriptor& table, const FacetMap& plaintexts, Node& node);
+  // The row a new row of `table` with `content` is placed under: its @belongsTo row, or this
+  // holder's root of the collection.
+  Result<std::string> parentOfNewRow(const std::string& collection, const TableDescriptor& table, const Json& content);
+  // The root of `collection` owned by the user this holder acts for.
+  const Node* ownRootOf(const std::string& collection) const;
+  std::string actingUserId() const;
+  Result<std::string> createRoot(const CreateNodeRequest& request);
+  Result<std::string> createRow(const CreateNodeRequest& request);
+  Status deleteRow(const std::string& nodeId, std::set<std::string>& deleted);
+  Status deleteCascadingLinkers(const std::string& targetId, std::set<std::string>& deleted);
+  // Whether `linker` refers to `targetId` through a reference marked @onDelete("cascade").
+  bool cascadesFrom(const Node& linker, const std::string& targetId);
   Status signAndStore(Node& node);
+  Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   Status createOwnerGrant(const Node& root, const SymmetricKey& nodeKey);
   Status queueGrant(const AccessGrant& grant);
   std::string trustedOwnerOf(const Node& node) const;
@@ -290,39 +314,6 @@ class Client {
   bool canManageAccess(const Node& node) const;
   Result<std::string> grantCertificateFor(const std::string& principalType, const std::string& principalId) const;
   std::string nextOutboxId();
-  struct RotationStep;
-  struct ContentChange {
-    FacetMap plaintexts;
-    std::vector<NodeFile> files;
-  };
-  Result<RotationStep> planNodeRotation(const Node& node, const std::string& removedType,
-                                        const std::string& removedId);
-  Status applyRotationStep(RotationStep& step, const SymmetricKey* newParentKey, uint32_t newParentEpoch);
-  Status reissueGrant(const AccessGrant& old, const Bytes& encPub, uint32_t epoch, const SymmetricKey& nodeKey);
-  // `change`, when set, replaces the content sealed under the new key.
-  Status rotateNode(const std::string& nodeId, const std::string& removedType, const std::string& removedId,
-                    const ContentChange* change, RotationReport& report);
-  Status rekeyShortcuts(const std::string& targetId, const SymmetricKey& targetKey, uint32_t targetEpoch,
-                        RotationReport& report);
-  Status rekeyShortcut(const std::string& shortcutId, const SymmetricKey& targetKey, uint32_t targetEpoch);
-  Status currentParentKey(const Node& node, SymmetricKey& parentKey, uint32_t& parentEpoch);
-  // Stale: wrapped under an earlier key of its parent. Unknown: no parent, or one whose key this
-  // holder lacks.
-  enum class Wrapping { Current, Stale, Unknown };
-  Wrapping wrappingOf(const Node& node);
-  // From the topmost stale node among `nodeId` and its ancestors down to `nodeId`, whose keys a removed
-  // principal may hold; empty when none is stale.
-  std::vector<std::string> exposedChainOf(const std::string& nodeId);
-  bool canRewrapShortcut(const Node& shortcut);
-  // Whether a shortcut to the item that this holder may wrap again sits under a stale node, so a
-  // removed principal may hold the item's key.
-  bool isExposedThroughShortcuts(const Node& node);
-  // Rotates the exposed ancestors of `nodeId` top down; true when `nodeId` itself is exposed.
-  Result<bool> refreshAncestors(const std::string& nodeId, RotationReport& report);
-  // Rotates `nodeId` and its ancestors where exposed, before something new is wrapped under it.
-  Status refreshKeys(const std::string& nodeId, RotationReport& report);
-  // Writes `change` to an exposed node under a new key; false when the node is not exposed.
-  Result<bool> writeUnderNewKey(const std::string& nodeId, const ContentChange& change);
   // Records the registered schema version on a node whose content this client just encoded.
   void stampSchemaVersion(Node& node) const;
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
@@ -330,9 +321,9 @@ class Client {
   Result<AccessGrant> grantNode(const ShareRequest& request);
   Status queueRevocation(const std::string& nodeId, const std::string& principalType, const std::string& principalId);
   int rankOnNode(const Node& node) const;
-  int inheritedRank(const Node& node) const;
-  // The best min(role on shortcut, targetRole) over live shortcuts to the node.
-  int rankThroughShortcuts(const Node& node) const;
+  // The best of the row's own rank, its parent's, and read through a row linking to it.
+  int rankOf(const Node& node, std::map<std::string, int>& ranks) const;
+  int rankThroughLinks(const Node& node, std::map<std::string, int>& ranks) const;
   int capByScopes(int rank, const Node& node) const;
 
   struct RegisteredDescriptor {
@@ -358,6 +349,10 @@ class Client {
   FieldIndex index_;
   // Nodes not in the index because they cannot be read yet.
   std::set<std::string> unindexedNodeIds_;
+  // Rows whose key is being looked up through the rows linking to them, so a cycle of links ends.
+  std::set<std::string> rowsResolvingThroughLinks_;
+  // Set when one of this holder's own grants was revoked, until removeRowsOutOfReach runs.
+  bool ownGrantRevoked_ = false;
 #if defined(NW_ENABLE_TEST_HOOKS)
   size_t contentDecryptions_ = 0;
 #endif

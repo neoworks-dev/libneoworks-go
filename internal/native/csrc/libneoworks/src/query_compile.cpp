@@ -9,10 +9,6 @@ namespace {
 
 struct Context {
   const ModelDescriptor* model = nullptr;
-  // The model `parent.is` filters on; null when the schema has none.
-  const ModelDescriptor* container = nullptr;
-  // False inside `parent.is`, where there is no further parent.
-  bool hasParent = true;
   CodecError* error = nullptr;
 };
 
@@ -72,16 +68,6 @@ bool operatorFits(FilterOperator filterOperator, FieldType type) {
     return type == FieldType::Text;
   }
   return true;
-}
-
-const FieldDescriptor& parentIdField() {
-  static const FieldDescriptor field = [] {
-    FieldDescriptor parentId;
-    parentId.name = "parent";
-    parentId.value.scalar = Scalar::String;
-    return parentId;
-  }();
-  return field;
 }
 
 Result<std::optional<Comparable>> compileOperand(const Context& context, const FieldDescriptor& field, FieldType type,
@@ -247,67 +233,6 @@ Result<Condition> compileField(const Context& context, const std::string& name, 
 
 Result<Condition> compileWhere(const Context& context, const Json& json, const std::string& path);
 
-Result<Condition> compileParentIs(const Context& context, const Json& value, const std::string& path) {
-  if (context.container == nullptr) {
-    return fail(context, path, "the schema has no container model to filter on");
-  }
-  Context parentContext;
-  parentContext.model = context.container;
-  parentContext.hasParent = false;
-  parentContext.error = context.error;
-  Result<Condition> condition = compileWhere(parentContext, value, path);
-  if (!condition.ok()) {
-    return condition;
-  }
-  Condition parentIs;
-  parentIs.type = Condition::Type::ParentIs;
-  parentIs.children.push_back(condition.take());
-  return parentIs;
-}
-
-Condition asParentIdTests(Condition condition) {
-  if (condition.type == Condition::Type::Field) {
-    condition.type = Condition::Type::ParentId;
-    return condition;
-  }
-  for (Condition& child : condition.children) {
-    child = asParentIdTests(std::move(child));
-  }
-  return condition;
-}
-
-Result<Condition> compileParentIds(const Context& context, const Json& value, const std::string& path) {
-  FieldFilter filter;
-  filter.field = &parentIdField();
-  filter.type = FieldType::Text;
-  filter.equalityOnly = true;
-  Result<Condition> operators = compileFieldFilter(context, filter, value, path);
-  if (!operators.ok()) {
-    return operators;
-  }
-  return asParentIdTests(operators.take());
-}
-
-Result<Condition> compileParent(const Context& context, const Json& value, const std::string& path) {
-  if (!context.hasParent) {
-    return fail(context, path, "unknown field parent on " + context.model->name);
-  }
-  if (!value.is_object()) {
-    return compileParentIds(context, value, path);
-  }
-  Json idOperators = value;
-  idOperators.erase("is");
-  Result<Condition> ids = compileParentIds(context, idOperators, path);
-  if (!ids.ok() || !value.contains("is")) {
-    return ids;
-  }
-  Result<Condition> parentIs = compileParentIs(context, value.at("is"), path + ".is");
-  if (!parentIs.ok()) {
-    return parentIs;
-  }
-  return conjunction({ids.take(), parentIs.take()});
-}
-
 Result<std::vector<Condition>> compileConditionList(const Context& context, const Json& value, const std::string& path) {
   std::vector<Condition> conditions;
   if (value.is_object()) {
@@ -357,9 +282,6 @@ Result<Condition> compileEntry(const Context& context, const std::string& name, 
                                const std::string& path) {
   if (name == "AND" || name == "OR" || name == "NOT") {
     return compileLogical(context, name, value, path);
-  }
-  if (name == "parent") {
-    return compileParent(context, value, path);
   }
   return compileField(context, name, value, path);
 }
@@ -431,6 +353,36 @@ Status compileTake(const Context& context, const Json& json, Query& query) {
   return Status::Ok;
 }
 
+Status compileIncludedField(const Context& context, const std::string& name, const Json& flag, Query& query) {
+  std::string path = "include." + name;
+  const FieldDescriptor* field = context.model->fieldByName(name);
+  bool singleReference = field != nullptr && field->value.kind == ValueKind::Reference &&
+                         field->container.kind == ContainerKind::Singular;
+  if (!singleReference) {
+    return fail(context, path, "include names a single ref field of " + context.model->name);
+  }
+  if (!flag.is_boolean()) {
+    return fail(context, path, "must be true or false");
+  }
+  if (flag.get<bool>()) {
+    query.include.push_back(IncludedField{field->ordinal, name});
+  }
+  return Status::Ok;
+}
+
+Status compileInclude(const Context& context, const Json& json, Query& query) {
+  if (!json.is_object()) {
+    return fail(context, "include", "expects an object of ref fields");
+  }
+  for (const auto& [name, flag] : json.items()) {
+    Status compiled = compileIncludedField(context, name, flag, query);
+    if (compiled != Status::Ok) {
+      return compiled;
+    }
+  }
+  return Status::Ok;
+}
+
 Status compileSection(const Context& context, const std::string& name, const Json& value, Query& query) {
   if (name == "where") {
     Result<Condition> where = compileWhere(context, value, "where");
@@ -451,20 +403,21 @@ Status compileSection(const Context& context, const std::string& name, const Jso
   if (name == "take") {
     return compileTake(context, value, query);
   }
-  return fail(context, name, "unknown query key " + name + ", expected where, orderBy or take");
+  if (name == "include") {
+    return compileInclude(context, value, query);
+  }
+  return fail(context, name, "unknown query key " + name + ", expected where, orderBy, take or include");
 }
 
 }  // namespace
 
-Result<Query> compileQuery(const Json& json, const ModelDescriptor& item, const ModelDescriptor* container,
-                           CodecError& error) {
+Result<Query> compileQuery(const Json& json, const ModelDescriptor& model, CodecError& error) {
   error = CodecError{};
   Context context;
-  context.model = &item;
-  context.container = container;
+  context.model = &model;
   context.error = &error;
   if (!json.is_object()) {
-    return fail(context, "", "a query is an object with where, orderBy and take");
+    return fail(context, "", "a query is an object with where, orderBy, take and include");
   }
   Query query;
   for (const auto& [name, value] : json.items()) {

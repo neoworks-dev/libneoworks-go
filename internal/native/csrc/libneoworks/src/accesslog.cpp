@@ -9,7 +9,7 @@ namespace nw {
 Bytes zeroPrevHash() { return Bytes(kEntryHashBytes, 0); }
 
 Bytes entryBytes(const AccessLogEntry& entry) {
-  return TlvWriter("nw-access-entry-v1")
+  return TlvWriter("nw-access-entry-v2")
       .text(entry.nodeId)
       .u64(entry.index)
       .bytes(entry.prevHash)
@@ -18,7 +18,6 @@ Bytes entryBytes(const AccessLogEntry& entry) {
       .text(entry.principalId)
       .text(entry.role)
       .text(facetsCsv(entry.facets))
-      .u32(entry.epoch)
       .bytes(entry.wrappedKeysHash)
       .text(entry.actorType)
       .text(entry.actorId)
@@ -54,7 +53,6 @@ Json entryToJson(const AccessLogEntry& entry) {
   if (entry.facets.has_value()) {
     json["facets"] = *entry.facets;
   }
-  json["epoch"] = entry.epoch;
   json["wrappedKeysHash"] = bytesToJson(entry.wrappedKeysHash);
   json["actorType"] = entry.actorType;
   json["actorId"] = entry.actorId;
@@ -87,11 +85,11 @@ Result<std::optional<std::vector<uint32_t>>> readFacets(const Json& json) {
 
 struct EntryScalars {
   std::optional<std::string> nodeId, action, principalType, principalId, role, actorType, actorId;
-  std::optional<uint64_t> index, epoch;
+  std::optional<uint64_t> index;
   std::optional<Bytes> prevHash, wrappedKeysHash, signature;
 
   bool complete() const {
-    return nodeId && action && principalType && principalId && role && actorType && actorId && index && epoch &&
+    return nodeId && action && principalType && principalId && role && actorType && actorId && index &&
            prevHash && wrappedKeysHash && signature;
   }
 };
@@ -106,7 +104,6 @@ EntryScalars readEntryScalars(const Json& json) {
   scalars.actorType = readString(json, "actorType");
   scalars.actorId = readString(json, "actorId");
   scalars.index = readUnsigned(json, "index");
-  scalars.epoch = readUnsigned(json, "epoch");
   scalars.prevHash = readBytes(json, "prevHash");
   scalars.wrappedKeysHash = readBytes(json, "wrappedKeysHash");
   scalars.signature = readBytes(json, "signature");
@@ -116,7 +113,7 @@ EntryScalars readEntryScalars(const Json& json) {
 bool hasValidEntryShape(const EntryScalars& scalars) {
   bool actionValid = *scalars.action == "grant" || *scalars.action == "revoke";
   return actionValid && isLowercaseUuid(*scalars.nodeId) && isValidPrincipalType(*scalars.principalType) &&
-         *scalars.epoch <= UINT32_MAX && scalars.prevHash->size() == kEntryHashBytes;
+         scalars.prevHash->size() == kEntryHashBytes;
 }
 
 }  // namespace
@@ -141,7 +138,6 @@ Result<AccessLogEntry> entryFromJson(const Json& json) {
   entry.principalId = *scalars.principalId;
   entry.role = *scalars.role;
   entry.facets = facets.take();
-  entry.epoch = static_cast<uint32_t>(*scalars.epoch);
   entry.wrappedKeysHash = std::move(*scalars.wrappedKeysHash);
   entry.actorType = *scalars.actorType;
   entry.actorId = *scalars.actorId;
@@ -172,7 +168,6 @@ AccessLogEntry nextGrantEntry(const AccessGrant& grant, const std::optional<LogH
   entry.principalId = grant.principalId;
   entry.role = grant.role;
   entry.facets = grant.facets;
-  entry.epoch = grant.epoch;
   entry.wrappedKeysHash = hash(grant.wrappedKeys);
   entry.actorType = grant.grantedByType;
   entry.actorId = grant.grantedById;
@@ -203,9 +198,14 @@ void bindGrantToEntry(AccessGrant& grant, const AccessLogEntry& entry) {
 bool entryMatchesGrant(const AccessLogEntry& entry, const AccessGrant& grant) {
   return entry.action == "grant" && entry.nodeId == grant.nodeId && entry.index == grant.logIndex &&
          entry.principalType == grant.principalType && entry.principalId == grant.principalId &&
-         entry.role == grant.role && entry.facets == grant.facets && entry.epoch == grant.epoch &&
+         entry.role == grant.role && entry.facets == grant.facets &&
          entry.wrappedKeysHash == hash(grant.wrappedKeys) && entry.actorType == grant.grantedByType &&
          entry.actorId == grant.grantedById && entry.certId == grant.certId && entry.signature == grant.signature;
+}
+
+bool entryMatchesRevocation(const AccessLogEntry& entry, const AccessGrant& grant) {
+  return entry.action == "revoke" && entry.nodeId == grant.nodeId && entry.index == grant.logIndex &&
+         entry.principalType == grant.principalType && entry.principalId == grant.principalId;
 }
 
 Status checkLink(const std::optional<LogHead>& head, const AccessLogEntry& entry) {
@@ -227,7 +227,7 @@ void applyEntry(ChainState& state, const AccessLogEntry& entry) {
     state.active.erase(key);
     return;
   }
-  state.active[key] = ActiveGrant{entry.role, entry.facets, entry.epoch, entry.actorId, entry.index};
+  state.active[key] = ActiveGrant{entry.role, entry.facets, entry.actorId, entry.index};
 }
 
 ChainState replay(const std::vector<AccessLogEntry>& entries) {

@@ -15,7 +15,7 @@ namespace nw {
 Result<std::vector<NodeFile>> collectFiles(const ModelDescriptor& model, const Json& content);
 
 // The file list of a node whose facets hold `plaintexts`.
-Result<std::vector<NodeFile>> filesOfFacets(const NodeDescriptor& descriptor, const FacetMap& plaintexts,
+Result<std::vector<NodeFile>> filesOfFacets(const TableDescriptor& descriptor, const FacetMap& plaintexts,
                                             CodecError& error);
 
 // The key of the file that has an object with `objectId`, its original or one of its variants,
@@ -37,6 +37,6 @@ void removeFileKeys(const ModelDescriptor& model, Json& content);
 // IntegrityFailure unless every file in `content`, the decoded readable facets of `node`, is in
 // the plain list of `node`. The list may hold more: a reader whose descriptor predates a File
 // field does not see that field's files, and opening them needs the record's key anyway.
-Status checkNodeFiles(const NodeDescriptor& descriptor, const Node& node, const Json& content);
+Status checkNodeFiles(const TableDescriptor& descriptor, const Node& node, const Json& content);
 
 }  // namespace nw

@@ -150,7 +150,7 @@ func TestNodeOperationsNeedAGrant(t *testing.T) {
 func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 	client := newTestClient(t)
 	collection := "@neoworks/calendar"
-	if _, err := client.Query(collection, Query{}); !errors.Is(err, StatusInvalidState) {
+	if _, err := client.Query(collection, "Event", Query{}); !errors.Is(err, StatusInvalidState) {
 		t.Fatalf("before the descriptor is confirmed: got %v, want %v", err, StatusInvalidState)
 	}
 	descriptor := readDescriptor(t)
@@ -162,38 +162,39 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 	}
 
 	take := 5
-	ids, err := client.Query(collection, Query{
+	rows, err := client.Query(collection, "Event", Query{
 		Where: map[string]any{
-			"title":  map[string]any{"contains": "standup", "mode": "insensitive"},
-			"parent": map[string]any{"is": map[string]any{"name": "Work"}},
-			"OR":     []any{map[string]any{"description": nil}, map[string]any{"start": map[string]any{"gte": "2026-10-01T00:00:00Z"}}},
+			"title":    map[string]any{"contains": "standup", "mode": "insensitive"},
+			"calendar": "00000000-0000-4000-8000-000000000001",
+			"OR":       []any{map[string]any{"notes": nil}, map[string]any{"start": map[string]any{"gte": "2026-10-01T00:00:00Z"}}},
 		},
 		OrderBy: []map[string]string{{"start": "asc"}, {"title": "desc"}},
 		Take:    &take,
+		Include: map[string]bool{"calendar": true},
 	})
-	if err != nil || len(ids) != 0 {
-		t.Fatalf("a fresh store matches %v %v", ids, err)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("a fresh store matches %v %v", rows, err)
 	}
 
-	_, err = client.Query(collection, Query{Where: map[string]any{"colour": "blue"}})
+	_, err = client.Query(collection, "Event", Query{Where: map[string]any{"colour": "blue"}})
 	var contentError *ContentError
 	if !errors.As(err, &contentError) || !errors.Is(err, StatusInvalidArgument) || contentError.Path != "where.colour" {
 		t.Fatalf("unknown field: got %v", err)
 	}
-	_, err = client.Query(collection, Query{Where: map[string]any{"start": map[string]any{"contains": "2026"}}})
+	_, err = client.Query(collection, "Event", Query{Where: map[string]any{"start": map[string]any{"contains": "2026"}}})
 	if !errors.As(err, &contentError) || contentError.Path != "where.start.contains" {
 		t.Fatalf("operator that does not fit: got %v", err)
 	}
 	negative := -1
-	if _, err := client.Query(collection, Query{Take: &negative}); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := client.Query(collection, "Event", Query{Take: &negative}); !errors.Is(err, StatusInvalidArgument) {
 		t.Fatalf("negative take: got %v", err)
 	}
 }
 
-const fileDescriptor = `{"descriptorVersion":1,"namespace":"neoworks.photos","enums":[],"models":[{"name":"Photo","fields":[
+const fileDescriptor = `{"descriptorVersion":2,"namespace":"neoworks.photos","enums":[],"models":[{"name":"Photo","fields":[
 {"ordinal":1,"name":"image","container":{"kind":"singular","nullable":false},"value":{"kind":"file"},"required":true,"constraints":{}},
 {"ordinal":2,"name":"attachments","container":{"kind":"repeatedLen"},"value":{"kind":"file"},"required":false,"constraints":{}}]}],
-"nodes":[{"kind":"item","model":"Photo","facets":[{"name":"default","tag":1,"fields":[1,2]}],"searchable":[2],"title":1,"timeRange":null}]}`
+"tables":[{"model":"Photo","facets":[{"name":"default","tag":1,"fields":[1,2]}],"searchable":[2],"title":1,"timeRange":null,"belongsTo":null,"cascade":[]}]}`
 
 func TestDescriptorsMayDeclareFileFieldsAndRejectOtherFileShapes(t *testing.T) {
 	client := newTestClient(t)
@@ -204,9 +205,9 @@ func TestDescriptorsMayDeclareFileFieldsAndRejectOtherFileShapes(t *testing.T) {
 	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(named), "1.0.0"); !errors.Is(err, StatusMalformed) {
 		t.Fatalf("a File value with a name: got %v", err)
 	}
-	asset := strings.Replace(fileDescriptor, `"kind":"item","model"`, `"kind":"asset","model"`, 1)
-	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(asset), "1.0.0"); !errors.Is(err, StatusMalformed) {
-		t.Fatalf("the asset node kind: got %v", err)
+	unknown := strings.Replace(fileDescriptor, `"tables":[{"model":"Photo"`, `"tables":[{"model":"Album"`, 1)
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(unknown), "1.0.0"); !errors.Is(err, StatusMalformed) {
+		t.Fatalf("a table naming no model: got %v", err)
 	}
 }
 

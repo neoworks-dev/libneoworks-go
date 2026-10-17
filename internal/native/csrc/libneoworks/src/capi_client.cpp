@@ -106,7 +106,6 @@ Json nodeSummary(Client& client, const LocalNode& local) {
   json["ownerId"] = node.ownerId;
   json["collection"] = node.collection;
   json["kind"] = node.kind;
-  json["epoch"] = node.epoch;
   json["deleted"] = node.deleted;
   json["seq"] = node.seq;
   json["baseSeq"] = node.baseSeq;
@@ -117,19 +116,30 @@ Json nodeSummary(Client& client, const LocalNode& local) {
   json["dirty"] = local.dirty;
   json["rejected"] = local.rejected;
   json["role"] = client.effectiveRole(node.id);
-  json["targetId"] = Json(nullptr);
-  json["targetRole"] = Json(nullptr);
-  if (node.targetId.has_value()) {
-    json["targetId"] = *node.targetId;
-    json["targetRole"] = *node.targetRole;
+  json["table"] = Json(nullptr);
+  std::optional<std::string> table = client.tableOf(node.id);
+  if (table.has_value()) {
+    json["table"] = *table;
   }
   json["files"] = filesToJson(node.files);
+  json["links"] = Json(node.links);
   return json;
 }
 
-Json rotationReportJson(const RotationReport& report) {
+Json queryRowJson(const QueryRow& row) {
   Json json = Json::object();
-  json["rotatedNodeIds"] = report.rotatedNodeIds;
+  json["id"] = row.id;
+  if (row.included.empty()) {
+    return json;
+  }
+  Json included = Json::object();
+  for (const auto& [field, rowId] : row.included) {
+    included[field] = Json(nullptr);
+    if (rowId.has_value()) {
+      included[field] = *rowId;
+    }
+  }
+  json["include"] = included;
   return json;
 }
 
@@ -406,34 +416,13 @@ int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer
       return code(Status::Malformed);
     }
     CreateNodeRequest request;
-    request.parentId = readString(*json, "parentId");
     request.collection = readString(*json, "collection").value_or("");
-    request.kind = readString(*json, "kind").value_or("");
+    request.kind = readString(*json, "kind").value_or("row");
+    request.table = readString(*json, "table").value_or("");
     if (json->contains("content")) {
       request.content = json->at("content");
     }
     Result<std::string> created = client->value->createNode(request);
-    if (!created.ok()) {
-      return code(created.status());
-    }
-    return fillText(node_id, created.value());
-  });
-}
-
-int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id) {
-  if (!hasArguments(client, request_json) || node_id == nullptr) {
-    return NW_ERR_INVALID_ARGUMENT;
-  }
-  return guarded([&] {
-    std::optional<Json> json = parseText(request_json);
-    if (!json.has_value()) {
-      return code(Status::Malformed);
-    }
-    CreateShortcutRequest request;
-    request.parentId = readString(*json, "parentId").value_or("");
-    request.targetId = readString(*json, "targetId").value_or("");
-    request.targetRole = readString(*json, "targetRole").value_or("");
-    Result<std::string> created = client->value->createShortcut(request);
     if (!created.ok()) {
       return code(created.status());
     }
@@ -459,11 +448,11 @@ int nw_client_update_node(nw_client* client, const char* request_json) {
   });
 }
 
-int nw_client_delete_node(nw_client* client, const char* node_id, int recursive) {
+int nw_client_delete_node(nw_client* client, const char* node_id) {
   if (!hasArguments(client, node_id)) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] { return code(client->value->deleteNode(node_id, recursive != 0)); });
+  return guarded([&] { return code(client->value->deleteNode(node_id)); });
 }
 
 int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json) {
@@ -551,24 +540,27 @@ int nw_client_effective_role(nw_client* client, const char* node_id, nw_buffer* 
   return guarded([&] { return fillText(role, client->value->effectiveRole(node_id)); });
 }
 
-int nw_client_query_range(nw_client* client, const char* collection, int64_t start_unix_millis,
+int nw_client_query_range(nw_client* client, const char* collection, const char* table, int64_t start_unix_millis,
                           int64_t end_unix_millis, nw_buffer* json) {
-  if (!hasArguments(client, collection) || json == nullptr) {
+  if (!hasArguments(client, collection) || table == nullptr || json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded(
-      [&] { return fillJson(json, client->value->queryRange(collection, start_unix_millis, end_unix_millis)); });
+  return guarded([&] {
+    return fillJson(json, client->value->queryRange(collection, table, start_unix_millis, end_unix_millis));
+  });
 }
 
-int nw_client_search(nw_client* client, const char* collection, const char* needle, nw_buffer* json) {
-  if (!hasArguments(client, collection) || needle == nullptr || json == nullptr) {
+int nw_client_search(nw_client* client, const char* collection, const char* table, const char* needle,
+                     nw_buffer* json) {
+  if (!hasArguments(client, collection) || table == nullptr || needle == nullptr || json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] { return fillJson(json, client->value->search(collection, needle)); });
+  return guarded([&] { return fillJson(json, client->value->search(collection, table, needle)); });
 }
 
-int nw_client_query(nw_client* client, const char* collection, const char* query_json, nw_buffer* json) {
-  if (!hasArguments(client, collection) || query_json == nullptr || json == nullptr) {
+int nw_client_query(nw_client* client, const char* collection, const char* table, const char* query_json,
+                    nw_buffer* json) {
+  if (!hasArguments(client, collection) || table == nullptr || query_json == nullptr || json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
@@ -576,11 +568,15 @@ int nw_client_query(nw_client* client, const char* collection, const char* query
     if (!query.has_value()) {
       return code(Status::Malformed);
     }
-    Result<std::vector<std::string>> ids = client->value->query(collection, *query);
-    if (!ids.ok()) {
-      return code(ids.status());
+    Result<std::vector<QueryRow>> rows = client->value->query(collection, table, *query);
+    if (!rows.ok()) {
+      return code(rows.status());
     }
-    return fillJson(json, ids.value());
+    Json list = Json::array();
+    for (const QueryRow& row : rows.value()) {
+      list.push_back(queryRowJson(row));
+    }
+    return fillJson(json, list);
   });
 }
 
@@ -699,19 +695,11 @@ int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer*
 }
 
 int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
-                            const char* principal_id, nw_buffer* report_json) {
-  bool valid = hasArguments(client, node_id) && principal_type != nullptr && principal_id != nullptr &&
-               report_json != nullptr;
-  if (!valid) {
+                            const char* principal_id) {
+  if (!hasArguments(client, node_id) || principal_type == nullptr || principal_id == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] {
-    Result<RotationReport> report = client->value->revokeAccess(node_id, principal_type, principal_id);
-    if (!report.ok()) {
-      return code(report.status());
-    }
-    return fillJson(report_json, rotationReportJson(report.value()));
-  });
+  return guarded([&] { return code(client->value->revokeAccess(node_id, principal_type, principal_id)); });
 }
 
 int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json) {
@@ -765,17 +753,11 @@ int nw_client_list_links(nw_client* client, const char* node_id, nw_buffer* json
   });
 }
 
-int nw_client_revoke_link(nw_client* client, const char* link_id, nw_buffer* report_json) {
-  if (!hasArguments(client, link_id) || report_json == nullptr) {
+int nw_client_revoke_link(nw_client* client, const char* link_id) {
+  if (!hasArguments(client, link_id)) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] {
-    Result<RotationReport> report = client->value->revokeLink(link_id);
-    if (!report.ok()) {
-      return code(report.status());
-    }
-    return fillJson(report_json, rotationReportJson(report.value()));
-  });
+  return guarded([&] { return code(client->value->revokeLink(link_id)); });
 }
 
 int nw_link_open(const char* pull_json, const char* fragment_key, nw_link_reader** out) {
@@ -812,9 +794,14 @@ int nw_link_list(nw_link_reader* reader, nw_buffer* json) {
       }
       entry["collection"] = node->collection;
       entry["kind"] = node->kind;
+      entry["table"] = Json(nullptr);
+      if (node->table.has_value()) {
+        entry["table"] = *node->table;
+      }
       entry["deleted"] = node->deleted;
       entry["updatedAt"] = node->updatedAt;
       entry["files"] = filesToJson(node->files);
+      entry["links"] = Json(node->links);
       list.push_back(std::move(entry));
     }
     return fillJson(json, list);

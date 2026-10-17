@@ -303,6 +303,7 @@ bool writeValue(const ValueShape& shape, const ValueConstraints& constraints, co
       return writeDecimal(shape, value, context, writer);
     case ValueKind::Message:
     case ValueKind::File:
+    case ValueKind::Reference:
       return writeNested(*shape.model, value, previousBody, context, writer);
     case ValueKind::Oneof:
       return writeOneof(shape, value, context, writer);
@@ -488,7 +489,8 @@ bool indexPrevious(ByteView bytes, PreviousFields& previous) {
 // The last previous value of a singular message field, so its unknown fields survive.
 ByteView previousMessageBody(const FieldDescriptor& field, const PreviousFields& previous) {
   auto found = previous.find(field.ordinal);
-  bool isMessage = field.value.kind == ValueKind::Message || field.value.kind == ValueKind::File;
+  bool isMessage = field.value.kind == ValueKind::Message || field.value.kind == ValueKind::File ||
+                   field.value.kind == ValueKind::Reference;
   bool singularMessage = field.container.kind == ContainerKind::Singular && isMessage;
   if (!singularMessage || found == previous.end() || found->second.back().type != WireType::Len) {
     return ByteView();

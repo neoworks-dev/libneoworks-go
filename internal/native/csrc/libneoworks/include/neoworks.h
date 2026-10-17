@@ -224,59 +224,69 @@ NW_API int nw_client_complete_descriptor_check(nw_client* client, const char* co
  * {"path": "Event.attendees[2].email", "reason": "is not a valid email"}; null after a success. */
 NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
 
-/* request: {"parentId": id|null, "collection": "@scope/name", "kind": ..., "content": {...}}.
- * content is a JSON object of the schema's model for the kind (contract amendment 7 JSON mapping);
- * roots take none. A File value in it, {"objectId", "name", "mediaType", "size", "variants"}, names
- * the storage objects of the file and its variants; the core lists them on the node, with their
- * chunk counts, gives each new file a random key that it keeps inside the encrypted content, and
- * the host uploads the objects with nw_blob_upload_begin. A File value never carries a key to or
- * from the host; one that does is refused. Writes the new node id.
- * NW_ERR_INVALID_ARGUMENT: the content does not fit the schema, or an object id is used by more
- * than one file of the node, see nw_client_last_content_error. If the node is shared, the people
- * it is shared with also get read access to the nodes its content refers to, where the creator may
- * share them. */
+/* request: {"collection": "@scope/name", "table": "Model", "content": {...}} for a row, or
+ * {"collection", "kind": "root"} for the collection's root, which only an account creates.
+ * content is a JSON object of the table's model (contract amendment 7 JSON mapping). A reference
+ * is the id of a live row this client can read, of the table the field names; the core keeps that
+ * row's key beside the id in the encrypted content and lists the row, unencrypted, in the new
+ * row's links, so whoever reads the new row reads the referenced one. The @belongsTo field names
+ * the row the new one belongs to: its key is wrapped under that row's key. Without it the row
+ * sits under this client's root of the collection. A File value in it, {"objectId", "name",
+ * "mediaType", "size", "variants"}, names the storage objects of the file and its variants; the
+ * core lists them on the row, with their chunk counts, gives each new file a random key that it
+ * keeps inside the encrypted content, and the host uploads the objects with nw_blob_upload_begin.
+ * A File value or a reference never carries a key to or from the host; one that does is refused.
+ * The row names its table in plain, next to its collection.
+ * Writes the new row id. NW_ERR_INVALID_ARGUMENT: the content does not fit the table, or an
+ * object id is used by more than one file of the row, see nw_client_last_content_error.
+ * NW_ERR_NOT_FOUND: a referenced row is not readable here, or there is no root to put it under. */
 NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer* node_id);
-/* A shortcut under "parentId" to the item "targetId" of the same collection: whoever can open the
- * parent holds at most "targetRole" ("read" | "write") on the target. The creator needs that role
- * on the target. request: {"parentId", "targetId", "targetRole"}. Writes the new node id. */
-NW_API int nw_client_create_shortcut(nw_client* client, const char* request_json, nw_buffer* node_id);
 /* request: {"nodeId": id, "changes": {...}}. A field in changes replaces the stored value, null
- * clears it, and fields not given keep their value. The node's file list follows its File values.
- * A File value with an object id the node holds keeps that file's key; any other gets a new one.
- * A reference added to a shared node is granted to the people it is shared with, as on creation. */
+ * clears it, and fields not given keep their value. The row's file list and links follow its File
+ * values and references. A File value with an object id the row holds keeps that file's key; any
+ * other gets a new one. The @belongsTo field cannot change. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
-NW_API int nw_client_delete_node(nw_client* client, const char* node_id, int recursive);
-/* Writes the fields of the facets this client can open as one JSON object. Roots and shortcuts read
- * as {}. NW_ERR_NOT_FOUND: no such node or no facet this client can open. NW_ERR_INTEGRITY: the
+/* Deletes the row, every row belonging to it, and every row linking to it through an
+ * @onDelete("cascade") reference that this client may write. */
+NW_API int nw_client_delete_node(nw_client* client, const char* node_id);
+/* Writes the fields of the facets this client can open as one JSON object; a reference reads as the
+ * id of its row. Roots read as {}. NW_ERR_NOT_FOUND: no such node or no facet this client can open. NW_ERR_INTEGRITY: the
  * node's file list does not match the File values in its content; the node is then reported as an
  * integrity failure by nw_sync_report. */
 NW_API int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json);
 /* Reads an older version of a node this client holds. `version_json` is one entry of
  * GET /nodes/{id}/versions. Writes {"content": {...}, "verified": bool, "authorType", "authorId",
- * "seq", "deleted", "createdAt"}. NW_ERR_NOT_FOUND: no key for the version's epoch;
+ * "seq", "deleted", "createdAt"}. NW_ERR_NOT_FOUND: no key for the node;
  * NW_ERR_AUTHENTICATION_FAILED: bad signature or ciphertext. */
 NW_API int nw_client_read_version(nw_client* client, const char* version_json, nw_buffer* json);
-/* Node metadata without key material or ciphertext. */
+/* Node metadata without key material or ciphertext: {"id", "parentId", "ownerId", "collection",
+ * "kind", "deleted", "seq", "baseSeq", "authorType", "authorId", "createdAt", "updatedAt",
+ * "dirty", "rejected", "role", "table": name|null, "files", "links"}. "table" is null for roots. */
 NW_API int nw_client_get_node(nw_client* client, const char* node_id, nw_buffer* json);
 /* parent_id and collection are optional filters (NULL = any). Returns a JSON array. */
 NW_API int nw_client_list_nodes(nw_client* client, const char* parent_id, const char* collection,
                                 nw_buffer* json);
 NW_API int nw_client_effective_role(nw_client* client, const char* node_id, nw_buffer* role);
-/* Ids of items whose @neoworks.timeRange interval overlaps [start, end), as a JSON array. */
-NW_API int nw_client_query_range(nw_client* client, const char* collection, int64_t start_unix_millis,
-                                 int64_t end_unix_millis, nw_buffer* json);
-/* Ids of items whose @neoworks.searchable fields contain needle, case-insensitively. */
-NW_API int nw_client_search(nw_client* client, const char* collection, const char* needle, nw_buffer* json);
-/* Ids of the items of collection that match query_json, a Prisma-style filter, as a JSON array:
- *   {"where": {...}, "orderBy": {"field": "asc"} | [{"field": "desc"}, ...], "take": n}
+/* Ids of rows of table whose @neoworks.timeRange interval overlaps [start, end), as a JSON array. */
+NW_API int nw_client_query_range(nw_client* client, const char* collection, const char* table,
+                                 int64_t start_unix_millis, int64_t end_unix_millis, nw_buffer* json);
+/* Ids of rows of table whose @neoworks.searchable fields contain needle, case-insensitively. */
+NW_API int nw_client_search(nw_client* client, const char* collection, const char* table, const char* needle,
+                            nw_buffer* json);
+/* The rows of table in collection that match query_json, a Prisma-style filter:
+ *   {"where": {...}, "orderBy": {"field": "asc"} | [{"field": "desc"}, ...], "take": n,
+ *    "include": {"refField": true}}
  * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
- * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive"), AND, OR and NOT
- * lists or objects, and "parent": an id, id operators, or {"is": {...container fields...}}.
- * Timestamps compare as instants. It reads the in-memory index of field values and decrypts
- * nothing. NW_ERR_INVALID_ARGUMENT: a field the schema does not define or an operator or value
- * that does not fit the field's type, see nw_client_last_content_error for the location.
- * NW_ERR_INVALID_STATE: no confirmed descriptor for the collection. NW_ERR_MALFORMED: not JSON. */
-NW_API int nw_client_query(nw_client* client, const char* collection, const char* query_json, nw_buffer* json);
+ * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive") and AND, OR and NOT
+ * lists or objects. A reference compares by the id of its row. Timestamps compare as instants.
+ * Writes [{"id": id, "include"?: {"refField": id|null}}]: include names single references whose
+ * row is read along, null when that row is deleted or not readable here. It reads the in-memory
+ * index of field values and decrypts nothing. NW_ERR_INVALID_ARGUMENT: a field or table the
+ * schema does not define, or an operator or value that does not fit the field's type, see
+ * nw_client_last_content_error for the location. NW_ERR_INVALID_STATE: no confirmed descriptor for
+ * the collection. NW_ERR_MALFORMED: not JSON. */
+NW_API int nw_client_query(nw_client* client, const char* collection, const char* table, const char* query_json,
+                           nw_buffer* json);
 /* Wipes keys and all local data for this holder. */
 NW_API int nw_client_wipe(nw_client* client);
 
@@ -296,15 +306,12 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
  *           "recipient": <identity json>}. Writes the signed AccessGrant JSON. One grant on the
- * node; a ref<Model> in its content is an id, and grants nothing on the node it names. */
+ * row shares it, the rows belonging to it and, for reading, the rows they link to. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
-/* Removes a principal and gives the node a new key so it cannot read later writes. The old key
- * stays in the node's key history, so nodes below it that are still wrapped under it remain
- * readable; each moves to a new key at its own next write. An ancestor still wrapped under an
- * earlier key of its parent moves first. report_json: {"rotatedNodeIds": [...]}. Files are not
- * touched: their keys live in the content, which is encrypted again with the new node key. */
+/* Removes the principal's grant; no key changes. The server stops sending the rows, and the
+ * principal's next pull removes the rows it reached only through the grant. */
 NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const char* principal_type,
-                                   const char* principal_id, nw_buffer* report_json);
+                                   const char* principal_id);
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);
 
 /* Link shares: the key travels in the URL fragment (`#k=`) and never reaches the server.
@@ -313,8 +320,8 @@ NW_API int nw_client_create_link_key(nw_client* client, const char* node_id, nw_
                                      nw_buffer* link_request_json);
 NW_API int nw_client_record_link(nw_client* client, const char* node_id, const char* link_id);
 NW_API int nw_client_list_links(nw_client* client, const char* node_id, nw_buffer* json);
-/* Rotates the linked node's keys and queues DELETE /links/{id}. Same report as revoke_access. */
-NW_API int nw_client_revoke_link(nw_client* client, const char* link_id, nw_buffer* report_json);
+/* Queues DELETE /links/{id}; no key changes. */
+NW_API int nw_client_revoke_link(nw_client* client, const char* link_id);
 
 /* Read-only view for visitors without an account; the only key is the URL fragment.
  * pull_json is the GET /links/{id}/pull response. */

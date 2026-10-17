@@ -281,8 +281,8 @@ void LocalDatabase::indexNode(const LocalNode& local) {
   if (node.parentId.has_value()) {
     childrenByParent_[*node.parentId].insert(node.id);
   }
-  if (node.targetId.has_value()) {
-    shortcutsByTarget_[*node.targetId].insert(node.id);
+  for (const std::string& target : node.links) {
+    linkersByTarget_[target].insert(node.id);
   }
   nodesByCollection_[node.collection].insert(node.id);
   if (local.dirty) {
@@ -295,8 +295,8 @@ void LocalDatabase::unindexNode(const LocalNode& local) {
   if (node.parentId.has_value()) {
     removeFromIndex(childrenByParent_, *node.parentId, node.id);
   }
-  if (node.targetId.has_value()) {
-    removeFromIndex(shortcutsByTarget_, *node.targetId, node.id);
+  for (const std::string& target : node.links) {
+    removeFromIndex(linkersByTarget_, target, node.id);
   }
   removeFromIndex(nodesByCollection_, node.collection, node.id);
   dirtyNodeIds_.erase(node.id);
@@ -369,8 +369,8 @@ std::vector<std::string> LocalDatabase::childrenOf(const std::string& parentId) 
   return idsUnder(childrenByParent_, parentId);
 }
 
-std::vector<std::string> LocalDatabase::shortcutsTo(const std::string& targetId) const {
-  return idsUnder(shortcutsByTarget_, targetId);
+std::vector<std::string> LocalDatabase::linkersOf(const std::string& targetId) const {
+  return idsUnder(linkersByTarget_, targetId);
 }
 
 namespace {
@@ -637,7 +637,7 @@ Status LocalDatabase::wipe() {
   std::vector<std::string> removedNodeIds = allNodeIds();
   nodes_.clear();
   childrenByParent_.clear();
-  shortcutsByTarget_.clear();
+  linkersByTarget_.clear();
   nodesByCollection_.clear();
   dirtyNodeIds_.clear();
   grants_.clear();

@@ -753,6 +753,7 @@ void SyncSession::applyPage() {
   if (report_.fullResync) {
     finishFullResync();
   }
+  client_.removeRowsOutOfReach();
 }
 
 void SyncSession::finishFullResync() {

@@ -22,10 +22,9 @@ struct AccessLogEntry {
   std::string action;  // "grant" | "revoke"
   std::string principalType;
   std::string principalId;
-  // Revokes carry an empty role, no facets and epoch 0.
+  // Revokes carry an empty role and no facets.
   std::string role;
   std::optional<std::vector<uint32_t>> facets;
-  uint32_t epoch = 0;
   // H(wrappedKeys) for grants, empty for revokes.
   Bytes wrappedKeysHash;
   std::string actorType;
@@ -59,6 +58,8 @@ AccessLogEntry nextRevokeEntry(const std::string& nodeId, const std::string& pri
 void bindGrantToEntry(AccessGrant& grant, const AccessLogEntry& entry);
 // The grant is exactly what the signed entry commits to.
 bool entryMatchesGrant(const AccessLogEntry& entry, const AccessGrant& grant);
+// The revoke entry a revoked grant points at: same row, principal and index.
+bool entryMatchesRevocation(const AccessLogEntry& entry, const AccessGrant& grant);
 
 // Checks the entry extends `head` (index and prevHash).
 Status checkLink(const std::optional<LogHead>& head, const AccessLogEntry& entry);
@@ -66,7 +67,6 @@ Status checkLink(const std::optional<LogHead>& head, const AccessLogEntry& entry
 struct ActiveGrant {
   std::string role;
   std::optional<std::vector<uint32_t>> facets;
-  uint32_t epoch = 0;
   std::string grantedBy;
   uint64_t index = 0;
 };

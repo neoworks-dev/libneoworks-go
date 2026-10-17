@@ -42,7 +42,6 @@ Json grantToJson(const AccessGrant& grant) {
   if (grant.facets.has_value()) {
     json["facets"] = *grant.facets;
   }
-  json["epoch"] = grant.epoch;
   json["wrappedKeys"] = bytesToJson(grant.wrappedKeys);
   json["grantedByType"] = grant.grantedByType;
   json["grantedById"] = grant.grantedById;
@@ -82,12 +81,11 @@ Result<std::optional<std::vector<uint32_t>>> facetsFromJson(const Json& json) {
 
 struct GrantScalars {
   std::optional<std::string> nodeId, principalType, principalId, role, grantedByType, grantedById, createdAt;
-  std::optional<uint64_t> epoch;
   std::optional<Bytes> wrappedKeys, signature;
 
   bool complete() const {
     return nodeId && principalType && principalId && role && grantedByType && grantedById && createdAt &&
-           epoch && wrappedKeys && signature;
+           wrappedKeys && signature;
   }
 };
 
@@ -100,7 +98,6 @@ GrantScalars readGrantScalars(const Json& json) {
   scalars.grantedByType = readString(json, "grantedByType");
   scalars.grantedById = readString(json, "grantedById");
   scalars.createdAt = readString(json, "createdAt");
-  scalars.epoch = readUnsigned(json, "epoch");
   scalars.wrappedKeys = readBytes(json, "wrappedKeys");
   scalars.signature = readBytes(json, "signature");
   return scalars;
@@ -115,7 +112,7 @@ bool hasValidGrantIdentity(const GrantScalars& scalars) {
 
 Result<AccessGrant> grantFromJson(const Json& json) {
   GrantScalars scalars = readGrantScalars(json);
-  if (!scalars.complete() || *scalars.epoch > UINT32_MAX || !hasValidGrantIdentity(scalars)) {
+  if (!scalars.complete() || !hasValidGrantIdentity(scalars)) {
     return Status::Malformed;
   }
   Result<std::optional<std::vector<uint32_t>>> facets = facetsFromJson(json);
@@ -134,7 +131,6 @@ Result<AccessGrant> grantFromJson(const Json& json) {
   grant.principalId = *scalars.principalId;
   grant.role = *scalars.role;
   grant.facets = facets.take();
-  grant.epoch = static_cast<uint32_t>(*scalars.epoch);
   grant.wrappedKeys = std::move(*scalars.wrappedKeys);
   grant.grantedByType = *scalars.grantedByType;
   grant.grantedById = *scalars.grantedById;
@@ -159,8 +155,7 @@ SecretBytes concatenateFacetKeys(const SymmetricKey& nodeKey, const std::vector<
 
 Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey& nodeKey) {
   bool validRequest = isLowercaseUuid(request.nodeId) && isValidPrincipalType(request.principalType) &&
-                      isValidPrincipalType(request.grantedByType) && isValidRole(request.role) &&
-                      request.epoch >= 1;
+                      isValidPrincipalType(request.grantedByType) && isValidRole(request.role);
   if (!validRequest) {
     return Status::InvalidArgument;
   }
@@ -170,7 +165,6 @@ Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey&
   grant.principalId = request.principalId;
   grant.role = request.role;
   grant.facets = request.facets;
-  grant.epoch = request.epoch;
   grant.grantedByType = request.grantedByType;
   grant.grantedById = request.grantedById;
   grant.certId = request.certId;

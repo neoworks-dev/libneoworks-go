@@ -6,36 +6,32 @@
 #include <vector>
 
 #include "grant.hpp"
-#include "key_history.hpp"
 #include "node.hpp"
 
 namespace nw {
 
 using NodeLookup = std::function<const Node*(const std::string& nodeId)>;
-using ShortcutLookup = std::function<std::vector<const Node*>(const std::string& targetId)>;
+// The key of a row as a reference in a row linking to it carries it; NotFound when none does.
+using LinkKeyLookup = std::function<Result<SymmetricKey>(const Node& target)>;
 
-// Node and facet keys this installation has been granted or derived. Old epochs
-// are retained so children wrapped under a previous parent epoch stay readable.
+// Row and facet keys this holder has been granted or derived, by row.
 class Keyring {
  public:
-  void addNodeKey(const std::string& nodeId, uint32_t epoch, SymmetricKey key);
-  void addFacetKey(const std::string& nodeId, uint32_t epoch, uint32_t facet, SymmetricKey key);
+  void addNodeKey(const std::string& nodeId, SymmetricKey key);
+  void addFacetKey(const std::string& nodeId, uint32_t facet, SymmetricKey key);
 
-  bool hasNodeKey(const std::string& nodeId, uint32_t epoch) const;
-  std::optional<SymmetricKey> findNodeKey(const std::string& nodeId, uint32_t epoch) const;
-  // Every known epoch for a node, newest first.
-  std::vector<std::pair<uint32_t, SymmetricKey>> allNodeKeys(const std::string& nodeId) const;
-  std::optional<SymmetricKey> findFacetKey(const std::string& nodeId, uint32_t epoch, uint32_t facet) const;
+  bool hasNodeKey(const std::string& nodeId) const;
+  std::optional<SymmetricKey> findNodeKey(const std::string& nodeId) const;
+  std::optional<SymmetricKey> findFacetKey(const std::string& nodeId, uint32_t facet) const;
 
   // Opens a grant addressed to the holder of (encPub, encSecret) and stores its keys.
   Status addGrant(const AccessGrant& grant, ByteView encPub, ByteView encSecret);
 
-  // Lets a node's key also be found through a shortcut to it: a shortcut's key is its target's
-  // key at the shortcut's epoch.
-  void setShortcutLookup(ShortcutLookup lookup) { shortcutLookup_ = std::move(lookup); }
+  // Lets a row's key also be found in the references of the rows linking to it.
+  void setLinkKeyLookup(LinkKeyLookup lookup) { linkKeyLookup_ = std::move(lookup); }
 
-  // Direct entry, else unwrap through the ancestor chain, else through a shortcut. Caches what
-  // it derives.
+  // Direct entry, else unwrap through the row it belongs to, else through a link to it. A key
+  // found through a link is kept only when it opens the row's content. Caches what it derives.
   Result<SymmetricKey> resolveNodeKey(const Node& node, const NodeLookup& lookup);
   Result<SymmetricKey> resolveFacetKey(const Node& node, uint32_t facet, const NodeLookup& lookup);
 
@@ -44,16 +40,13 @@ class Keyring {
 
  private:
   Result<SymmetricKey> resolveWithDepth(const Node& node, const NodeLookup& lookup, int depth);
-  Result<SymmetricKey> unwrapUnderParent(const Node& node, const Node& parent, const NodeLookup& lookup, int depth);
-  Result<SymmetricKey> unwrapWithKnownKeys(const Node& node, const std::string& parentId) const;
-  void addPreviousKeys(const Node& node, const SymmetricKey& nodeKey);
   Result<SymmetricKey> unwrapThroughParent(const Node& node, const NodeLookup& lookup, int depth);
-  Result<SymmetricKey> resolveThroughShortcuts(const Node& node, const NodeLookup& lookup, int depth);
+  Result<SymmetricKey> resolveThroughLinks(const Node& node);
 
-  ShortcutLookup shortcutLookup_;
+  LinkKeyLookup linkKeyLookup_;
 
-  std::map<std::string, std::map<uint32_t, SymmetricKey>> nodeKeys_;
-  std::map<std::string, std::map<std::pair<uint32_t, uint32_t>, SymmetricKey>> facetKeys_;
+  std::map<std::string, SymmetricKey> nodeKeys_;
+  std::map<std::string, std::map<uint32_t, SymmetricKey>> facetKeys_;
 };
 
 }  // namespace nw
