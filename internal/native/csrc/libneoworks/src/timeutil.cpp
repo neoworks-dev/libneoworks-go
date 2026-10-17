@@ -131,6 +131,14 @@ std::optional<int64_t> parseInstant(std::string_view text) {
   return *localSeconds - *offsetSeconds;
 }
 
+std::optional<int64_t> parseCanonicalExpiry(std::string_view text) {
+  std::optional<int64_t> seconds = parseRfc3339Utc(text);
+  if (!seconds.has_value() || formatRfc3339Utc(*seconds) != text) {
+    return std::nullopt;
+  }
+  return seconds;
+}
+
 std::string formatRfc3339Utc(int64_t unixSeconds) {
   int64_t days = floorDivide(unixSeconds, 86400);
   int64_t secondsOfDay = unixSeconds - days * 86400;

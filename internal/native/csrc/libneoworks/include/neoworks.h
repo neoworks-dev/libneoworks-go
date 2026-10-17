@@ -314,7 +314,8 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
  * Grants and revocations are queued and sent by the next sync. */
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
- *           "recipient": <identity json>}. Writes the signed AccessGrant JSON. One grant on the
+ *           "expiresAt"?: "YYYY-MM-DDTHH:MM:SSZ" after now, "recipient": <identity json>}. The expiry is signed
+ *           with the grant and stops its access from that moment. Writes the signed AccessGrant JSON. One grant on the
  * row shares it, the rows belonging to it and, for reading, the rows they link to. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
 /* Removes the principal's grant; no key changes. The server stops sending the rows, and the
@@ -324,10 +325,13 @@ NW_API int nw_client_revoke_access(nw_client* client, const char* node_id, const
 NW_API int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* json);
 
 /* Link shares: the key travels in the URL fragment (`#k=`) and never reaches the server.
- * fragment_key is secret. link_request_json is the POST /links body. */
-NW_API int nw_client_create_link_key(nw_client* client, const char* node_id, nw_buffer* fragment_key,
-                                     nw_buffer* link_request_json);
-NW_API int nw_client_record_link(nw_client* client, const char* node_id, const char* link_id);
+ * fragment_key is secret. link_request_json is the POST /links body. expires_at is NULL or a
+ * "YYYY-MM-DDTHH:MM:SSZ" instant after now, enforced by the server. */
+NW_API int nw_client_create_link_key(nw_client* client, const char* node_id, const char* expires_at,
+                                     nw_buffer* fragment_key, nw_buffer* link_request_json);
+/* expires_at as given to nw_client_create_link_key, or NULL. */
+NW_API int nw_client_record_link(nw_client* client, const char* node_id, const char* link_id,
+                                 const char* expires_at);
 NW_API int nw_client_list_links(nw_client* client, const char* node_id, nw_buffer* json);
 /* Queues DELETE /links/{id}; no key changes. */
 NW_API int nw_client_revoke_link(nw_client* client, const char* link_id);

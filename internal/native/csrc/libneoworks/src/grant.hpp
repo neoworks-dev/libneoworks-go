@@ -20,6 +20,8 @@ struct AccessGrant {
   std::string grantedByType;
   std::string grantedById;
   std::optional<std::string> certId;
+  // The moment the grant stops giving access, as YYYY-MM-DDTHH:MM:SSZ; part of the signed entry.
+  std::optional<std::string> expiresAt;
   // Signature of this grant's access log entry, and that entry's position in the node's chain.
   Bytes signature;
   uint64_t logIndex = 0;
@@ -34,6 +36,9 @@ int roleRank(std::string_view role);
 Json grantToJson(const AccessGrant& grant);
 Result<AccessGrant> grantFromJson(const Json& json);
 
+// No expiry, or a whole-second UTC instant (YYYY-MM-DDTHH:MM:SSZ) after now.
+bool isFutureExpiry(const std::optional<std::string>& expiresAt);
+
 std::string facetsCsv(const std::optional<std::vector<uint32_t>>& facets);
 
 struct GrantRequest {
@@ -46,6 +51,8 @@ struct GrantRequest {
   std::string grantedByType;
   std::string grantedById;
   std::optional<std::string> certId;
+  // Must be a whole-second UTC instant in the future.
+  std::optional<std::string> expiresAt;
   std::string createdAt;
 };
 

@@ -52,12 +52,15 @@ struct ShareRequest {
   // Absent: the whole row, the rows belonging to it and the rows they link to.
   std::optional<std::vector<uint32_t>> facets;
   Bytes principalEncPub;
+  // When the grant stops giving access; signed with the grant. See isFutureExpiry.
+  std::optional<std::string> expiresAt;
 };
 
 struct LinkRecord {
   std::string nodeId;
   std::string linkId;
   std::string createdAt;
+  std::optional<std::string> expiresAt;
 };
 
 struct SafetyCode {
@@ -181,9 +184,10 @@ class Client {
   // Removes the principal's grant. No key changes: the server stops sending the rows, and the
   // principal's next pull removes those it reached only through the grant.
   Status revokeAccess(const std::string& nodeId, const std::string& principalType, const std::string& principalId);
-  // Link shares: the fragment key is base64url(node key).
-  Result<std::string> createLinkFragment(const std::string& nodeId);
-  Status recordLink(const std::string& nodeId, const std::string& linkId);
+  // Link shares: the fragment key is base64url(node key). `expiresAt` (see isFutureExpiry) is
+  // checked here and goes into the POST /links body the host sends; the server enforces it.
+  Result<std::string> createLinkFragment(const std::string& nodeId, const std::optional<std::string>& expiresAt);
+  Status recordLink(const std::string& nodeId, const std::string& linkId, const std::optional<std::string>& expiresAt);
   std::vector<LinkRecord> linksFor(const std::string& nodeId) const;
   Status revokeLink(const std::string& linkId);
 

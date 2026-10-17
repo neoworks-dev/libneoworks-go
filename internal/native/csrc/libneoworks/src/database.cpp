@@ -577,8 +577,10 @@ void LocalDatabase::loadLink(const Bytes& plaintext) {
   std::optional<std::string> nodeId = readString(*json, "nodeId");
   std::optional<std::string> linkId = readString(*json, "linkId");
   std::optional<std::string> createdAt = readString(*json, "createdAt");
-  if (nodeId && linkId && createdAt) {
-    links_[*linkId] = LinkEntry{*nodeId, *linkId, *createdAt};
+  bool wellFormed = true;
+  std::optional<std::string> expiresAt = readOptionalString(*json, "expiresAt", wellFormed);
+  if (nodeId && linkId && createdAt && wellFormed) {
+    links_[*linkId] = LinkEntry{*nodeId, *linkId, *createdAt, expiresAt};
   }
 }
 
@@ -588,6 +590,10 @@ Status LocalDatabase::putLink(const LinkEntry& link) {
   json["nodeId"] = link.nodeId;
   json["linkId"] = link.linkId;
   json["createdAt"] = link.createdAt;
+  json["expiresAt"] = Json(nullptr);
+  if (link.expiresAt.has_value()) {
+    json["expiresAt"] = *link.expiresAt;
+  }
   return store_->put("link", link.linkId, encodeJson(json));
 }
 

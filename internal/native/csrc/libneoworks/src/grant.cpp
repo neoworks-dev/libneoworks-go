@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "timeutil.hpp"
 #include "tlv.hpp"
 
 namespace nw {
@@ -48,6 +49,10 @@ Json grantToJson(const AccessGrant& grant) {
   json["certId"] = Json(nullptr);
   if (grant.certId.has_value()) {
     json["certId"] = *grant.certId;
+  }
+  json["expiresAt"] = Json(nullptr);
+  if (grant.expiresAt.has_value()) {
+    json["expiresAt"] = *grant.expiresAt;
   }
   json["signature"] = bytesToJson(grant.signature);
   json["logIndex"] = grant.logIndex;
@@ -123,7 +128,9 @@ Result<AccessGrant> grantFromJson(const Json& json) {
   AccessGrant grant;
   grant.certId = readOptionalString(json, "certId", wellFormed);
   grant.revokedAt = readOptionalString(json, "revokedAt", wellFormed);
-  if (!wellFormed) {
+  grant.expiresAt = readOptionalString(json, "expiresAt", wellFormed);
+  bool expiryValid = !grant.expiresAt.has_value() || parseCanonicalExpiry(*grant.expiresAt).has_value();
+  if (!wellFormed || !expiryValid) {
     return Status::Malformed;
   }
   grant.nodeId = *scalars.nodeId;
@@ -153,9 +160,18 @@ SecretBytes concatenateFacetKeys(const SymmetricKey& nodeKey, const std::vector<
 
 }  // namespace
 
+bool isFutureExpiry(const std::optional<std::string>& expiresAt) {
+  if (!expiresAt.has_value()) {
+    return true;
+  }
+  std::optional<int64_t> seconds = parseCanonicalExpiry(*expiresAt);
+  return seconds.has_value() && *seconds > currentUnixSeconds();
+}
+
 Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey& nodeKey) {
   bool validRequest = isLowercaseUuid(request.nodeId) && isValidPrincipalType(request.principalType) &&
-                      isValidPrincipalType(request.grantedByType) && isValidRole(request.role);
+                      isValidPrincipalType(request.grantedByType) && isValidRole(request.role) &&
+                      isFutureExpiry(request.expiresAt);
   if (!validRequest) {
     return Status::InvalidArgument;
   }
@@ -168,6 +184,7 @@ Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey&
   grant.grantedByType = request.grantedByType;
   grant.grantedById = request.grantedById;
   grant.certId = request.certId;
+  grant.expiresAt = request.expiresAt;
   grant.createdAt = request.createdAt;
 
   Result<Bytes> sealed = Status::InvalidArgument;

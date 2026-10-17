@@ -99,6 +99,7 @@ Result<AccessGrant> Client::grantNode(const ShareRequest& request) {
   if (!certId.value().empty()) {
     grantRequest.certId = certId.value();
   }
+  grantRequest.expiresAt = request.expiresAt;
   grantRequest.createdAt = nowText();
   Result<AccessGrant> grant = createGrant(grantRequest, nodeKey.value());
   if (!grant.ok()) {
@@ -163,7 +164,11 @@ Status Client::revokeAccess(const std::string& nodeId, const std::string& princi
   return queueRevocation(nodeId, principalType, principalId);
 }
 
-Result<std::string> Client::createLinkFragment(const std::string& nodeId) {
+Result<std::string> Client::createLinkFragment(const std::string& nodeId,
+                                               const std::optional<std::string>& expiresAt) {
+  if (!isFutureExpiry(expiresAt)) {
+    return Status::InvalidArgument;
+  }
   const Node* node = database_->findNode(nodeId);
   if (node == nullptr || node->deleted) {
     return Status::NotFound;
@@ -182,17 +187,18 @@ Result<std::string> Client::createLinkFragment(const std::string& nodeId) {
   return encoded;
 }
 
-Status Client::recordLink(const std::string& nodeId, const std::string& linkId) {
+Status Client::recordLink(const std::string& nodeId, const std::string& linkId,
+                          const std::optional<std::string>& expiresAt) {
   if (database_->findNode(nodeId) == nullptr) {
     return Status::NotFound;
   }
-  return database_->putLink(LinkEntry{nodeId, linkId, nowText()});
+  return database_->putLink(LinkEntry{nodeId, linkId, nowText(), expiresAt});
 }
 
 std::vector<LinkRecord> Client::linksFor(const std::string& nodeId) const {
   std::vector<LinkRecord> records;
   for (const LinkEntry& entry : database_->linksForNode(nodeId)) {
-    records.push_back(LinkRecord{entry.nodeId, entry.linkId, entry.createdAt});
+    records.push_back(LinkRecord{entry.nodeId, entry.linkId, entry.createdAt, entry.expiresAt});
   }
   return records;
 }
