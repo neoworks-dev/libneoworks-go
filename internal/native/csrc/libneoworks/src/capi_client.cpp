@@ -236,6 +236,7 @@ Result<ShareRequest> parseShareRequest(nw_client* client, const Json& json) {
   request.role = readString(json, "role").value_or("");
   bool expiryWellFormed = true;
   request.expiresAt = readOptionalString(json, "expiresAt", expiryWellFormed);
+  request.via = readOptionalString(json, "via", expiryWellFormed);
   if (!expiryWellFormed) {
     return Status::Malformed;
   }

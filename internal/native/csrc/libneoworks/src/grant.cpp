@@ -19,6 +19,24 @@ int roleRank(std::string_view role) {
   return 0;
 }
 
+std::string grantId(const std::string& nodeId, const std::string& principalType, const std::string& principalId) {
+  return nodeId + ":" + principalType + ":" + principalId;
+}
+
+std::string grantId(const AccessGrant& grant) { return grantId(grant.nodeId, grant.principalType, grant.principalId); }
+
+bool isValidGrantId(std::string_view text) {
+  size_t firstSeparator = text.find(':');
+  size_t secondSeparator = text.find(':', firstSeparator + 1);
+  if (firstSeparator == std::string_view::npos || secondSeparator == std::string_view::npos) {
+    return false;
+  }
+  std::string_view nodeId = text.substr(0, firstSeparator);
+  std::string_view principalType = text.substr(firstSeparator + 1, secondSeparator - firstSeparator - 1);
+  std::string_view principalId = text.substr(secondSeparator + 1);
+  return isLowercaseUuid(nodeId) && isValidPrincipalType(principalType) && isLowercaseUuid(principalId);
+}
+
 std::string facetsCsv(const std::optional<std::vector<uint32_t>>& facets) {
   if (!facets.has_value()) {
     return std::string();
@@ -53,6 +71,10 @@ Json grantToJson(const AccessGrant& grant) {
   json["expiresAt"] = Json(nullptr);
   if (grant.expiresAt.has_value()) {
     json["expiresAt"] = *grant.expiresAt;
+  }
+  json["via"] = Json(nullptr);
+  if (grant.via.has_value()) {
+    json["via"] = *grant.via;
   }
   json["signature"] = bytesToJson(grant.signature);
   json["logIndex"] = grant.logIndex;
@@ -129,8 +151,10 @@ Result<AccessGrant> grantFromJson(const Json& json) {
   grant.certId = readOptionalString(json, "certId", wellFormed);
   grant.revokedAt = readOptionalString(json, "revokedAt", wellFormed);
   grant.expiresAt = readOptionalString(json, "expiresAt", wellFormed);
+  grant.via = readOptionalString(json, "via", wellFormed);
   bool expiryValid = !grant.expiresAt.has_value() || parseCanonicalExpiry(*grant.expiresAt).has_value();
-  if (!wellFormed || !expiryValid) {
+  bool viaValid = !grant.via.has_value() || isValidGrantId(*grant.via);
+  if (!wellFormed || !expiryValid || !viaValid) {
     return Status::Malformed;
   }
   grant.nodeId = *scalars.nodeId;
@@ -171,7 +195,8 @@ bool isFutureExpiry(const std::optional<std::string>& expiresAt) {
 Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey& nodeKey) {
   bool validRequest = isLowercaseUuid(request.nodeId) && isValidPrincipalType(request.principalType) &&
                       isValidPrincipalType(request.grantedByType) && isValidRole(request.role) &&
-                      isFutureExpiry(request.expiresAt);
+                      isFutureExpiry(request.expiresAt) &&
+                      (!request.via.has_value() || isValidGrantId(*request.via));
   if (!validRequest) {
     return Status::InvalidArgument;
   }
@@ -185,6 +210,7 @@ Result<AccessGrant> createGrant(const GrantRequest& request, const SymmetricKey&
   grant.grantedById = request.grantedById;
   grant.certId = request.certId;
   grant.expiresAt = request.expiresAt;
+  grant.via = request.via;
   grant.createdAt = request.createdAt;
 
   Result<Bytes> sealed = Status::InvalidArgument;

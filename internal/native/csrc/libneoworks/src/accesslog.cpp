@@ -24,6 +24,7 @@ Bytes entryBytes(const AccessLogEntry& entry) {
       .text(entry.actorId)
       .optionalText(entry.certId)
       .optionalText(entry.expiresAt)
+      .optionalText(entry.via)
       .finish();
 }
 
@@ -65,6 +66,10 @@ Json entryToJson(const AccessLogEntry& entry) {
   json["expiresAt"] = Json(nullptr);
   if (entry.expiresAt.has_value()) {
     json["expiresAt"] = *entry.expiresAt;
+  }
+  json["via"] = Json(nullptr);
+  if (entry.via.has_value()) {
+    json["via"] = *entry.via;
   }
   json["signature"] = bytesToJson(entry.signature);
   return json;
@@ -124,6 +129,14 @@ bool hasValidExpiry(const std::string& action, const std::optional<std::string>&
   return action == "grant" && parseCanonicalExpiry(*expiresAt).has_value();
 }
 
+// A revoke carries no source; a grant's is the id of another grant.
+bool hasValidVia(const std::string& action, const std::optional<std::string>& via) {
+  if (!via.has_value()) {
+    return true;
+  }
+  return action == "grant" && isValidGrantId(*via);
+}
+
 bool hasValidEntryShape(const EntryScalars& scalars) {
   bool actionValid = *scalars.action == "grant" || *scalars.action == "revoke";
   return actionValid && isLowercaseUuid(*scalars.nodeId) && isValidPrincipalType(*scalars.principalType) &&
@@ -141,7 +154,9 @@ Result<AccessLogEntry> entryFromJson(const Json& json) {
   bool wellFormed = true;
   std::optional<std::string> certId = readOptionalString(json, "certId", wellFormed);
   std::optional<std::string> expiresAt = readOptionalString(json, "expiresAt", wellFormed);
-  if (!facets.ok() || !wellFormed || !hasValidExpiry(*scalars.action, expiresAt)) {
+  std::optional<std::string> via = readOptionalString(json, "via", wellFormed);
+  bool validOptionals = hasValidExpiry(*scalars.action, expiresAt) && hasValidVia(*scalars.action, via);
+  if (!facets.ok() || !wellFormed || !validOptionals) {
     return Status::Malformed;
   }
   AccessLogEntry entry;
@@ -158,6 +173,7 @@ Result<AccessLogEntry> entryFromJson(const Json& json) {
   entry.actorId = *scalars.actorId;
   entry.certId = certId;
   entry.expiresAt = expiresAt;
+  entry.via = via;
   entry.signature = std::move(*scalars.signature);
   return entry;
 }
@@ -189,6 +205,7 @@ AccessLogEntry nextGrantEntry(const AccessGrant& grant, const std::optional<LogH
   entry.actorId = grant.grantedById;
   entry.certId = grant.certId;
   entry.expiresAt = grant.expiresAt;
+  entry.via = grant.via;
   chainOnto(entry, head);
   return entry;
 }
@@ -218,7 +235,7 @@ bool entryMatchesGrant(const AccessLogEntry& entry, const AccessGrant& grant) {
          entry.role == grant.role && entry.facets == grant.facets &&
          entry.wrappedKeysHash == hash(grant.wrappedKeys) && entry.actorType == grant.grantedByType &&
          entry.actorId == grant.grantedById && entry.certId == grant.certId && entry.expiresAt == grant.expiresAt &&
-         entry.signature == grant.signature;
+         entry.via == grant.via && entry.signature == grant.signature;
 }
 
 bool entryMatchesRevocation(const AccessLogEntry& entry, const AccessGrant& grant) {

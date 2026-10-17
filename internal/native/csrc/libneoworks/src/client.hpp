@@ -54,6 +54,9 @@ struct ShareRequest {
   Bytes principalEncPub;
   // When the grant stops giving access; signed with the grant. See isFutureExpiry.
   std::optional<std::string> expiresAt;
+  // The id of the grant this one is made from. A user passing their share of someone else's row on to
+  // their own install gets it filled in from their grant, and the grant then ends with that one.
+  std::optional<std::string> via;
 };
 
 struct LinkRecord {
@@ -328,6 +331,11 @@ class Client {
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
   // Writes and queues the grant described by `request`; the caller checked the right to share.
   Result<AccessGrant> grantNode(const ShareRequest& request);
+  // The signer's own whole-row grant on the row, or on the nearest row above it that has one.
+  std::optional<AccessGrant> ownWholeGrantOn(const std::string& nodeId) const;
+  std::optional<AccessGrant> ownGrantReaching(const Node& node) const;
+  // Fills in `via` and the expiry when a user passes their share of someone else's row to their install.
+  Result<ShareRequest> withSourceGrant(const Node& node, ShareRequest request) const;
   Status queueRevocation(const std::string& nodeId, const std::string& principalType, const std::string& principalId);
   int rankOnNode(const Node& node) const;
   // The best of the row's own rank, its parent's, and read through a row linking to it.

@@ -315,7 +315,10 @@ NW_API int nw_client_list_pins(nw_client* client, nw_buffer* json);
 
 /* request: {"nodeId", "principalType": "user", "principalId", "role", "facets": [..]|null,
  *           "expiresAt"?: "YYYY-MM-DDTHH:MM:SSZ" after now, "recipient": <identity json>}. The expiry is signed
- *           with the grant and stops its access from that moment. Writes the signed AccessGrant JSON. One grant on the
+ *           with the grant and stops its access from that moment. For principalType "install", "recipientEncPub"
+ *           replaces "recipient"; a user passing on their share of someone else's row gets "via" (the id of their own
+ *           grant, "<nodeId>:user:<userId>") and the expiry of that grant filled in, and the new grant ends with it.
+ *           Writes the signed AccessGrant JSON. One grant on the
  * row shares it, the rows belonging to it and, for reading, the rows they link to. */
 NW_API int nw_client_share_node(nw_client* client, const char* request_json, nw_buffer* grant_json);
 /* Removes the principal's grant; no key changes. The server stops sending the rows, and the
