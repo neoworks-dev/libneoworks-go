@@ -4,6 +4,7 @@
 
 #include <algorithm>
 
+#include "crypto.hpp"
 #include "files.hpp"
 #include "node_content.hpp"
 #include "references.hpp"
@@ -99,23 +100,89 @@ Result<SymmetricKey> LinkReader::resolveNodeKey(const std::string& nodeId) {
   return keyring_.resolveNodeKey(*node, lookup);
 }
 
-Status LinkReader::setDescriptor(const std::string& collection, std::string_view descriptorText) {
+Status LinkReader::setDescriptor(const std::string& collection, std::string_view descriptorText,
+                                 std::string_view schemaVersion) {
+  std::optional<Semver> version = parseSemverText(schemaVersion);
+  if (!version.has_value()) {
+    return Status::InvalidArgument;
+  }
   Result<std::shared_ptr<const SchemaDescriptor>> schema = parseDescriptor(descriptorText);
   if (!schema.ok()) {
     return schema.status();
   }
-  descriptors_[collection] = schema.take();
+  registered_[collection] = RegisteredSchema{schema.take(), *version};
   return Status::Ok;
+}
+
+std::vector<DescriptorNeed> LinkReader::missingDescriptors() const {
+  std::set<std::pair<std::string, std::string>> needed;
+  for (const auto& [id, node] : nodes_) {
+    auto registered = registered_.find(node.collection);
+    if (registered == registered_.end() || node.deleted || !node.schemaVersion.has_value()) {
+      continue;
+    }
+    std::optional<Semver> written = parseSemverText(*node.schemaVersion);
+    bool held = published_.count(node.collection + " " + *node.schemaVersion) > 0;
+    if (written.has_value() && *written < registered->second.version && !held) {
+      needed.insert({node.collection, *node.schemaVersion});
+    }
+  }
+  std::vector<DescriptorNeed> needs;
+  for (const auto& [collection, version] : needed) {
+    needs.push_back(DescriptorNeed{collection, version});
+  }
+  return needs;
+}
+
+Status LinkReader::acceptPublishedDescriptor(const DescriptorNeed& need, const std::string& descriptorHash,
+                                             const Bytes& text) {
+  if (toBase64Url(hash(text)) != descriptorHash) {
+    return Status::AuthenticationFailed;
+  }
+  Result<std::shared_ptr<const SchemaDescriptor>> schema = parseDescriptor(std::string(text.begin(), text.end()));
+  if (!schema.ok()) {
+    return schema.status();
+  }
+  published_[need.collection + " " + need.version] = schema.take();
+  return Status::Ok;
+}
+
+Result<const SchemaDescriptor*> LinkReader::schemaOfRow(const Node& node) const {
+  auto registered = registered_.find(node.collection);
+  if (registered == registered_.end()) {
+    return Status::InvalidState;
+  }
+  if (!node.schemaVersion.has_value()) {
+    return registered->second.schema.get();
+  }
+  std::optional<Semver> written = parseSemverText(*node.schemaVersion);
+  if (!written.has_value()) {
+    return Status::InvalidArgument;
+  }
+  if (*written == registered->second.version) {
+    return registered->second.schema.get();
+  }
+  if (*written > registered->second.version) {
+    return Status::Unsupported;
+  }
+  auto published = published_.find(node.collection + " " + *node.schemaVersion);
+  if (published == published_.end()) {
+    return Status::InvalidState;
+  }
+  return published->second.get();
 }
 
 Result<LinkReader::StoredContent> LinkReader::readStoredContent(const Node& node) {
   NodeLookup lookup = [this](const std::string& id) { return findNode(id); };
   FacetKeyResolver keyFor = [&](uint32_t tag) { return keyring_.resolveFacetKey(node, tag, lookup); };
-  auto schema = descriptors_.find(node.collection);
-  if (schema == descriptors_.end() || schema->second->tableByName(*node.table) == nullptr) {
+  Result<const SchemaDescriptor*> schema = schemaOfRow(node);
+  if (!schema.ok()) {
+    return schema.status();
+  }
+  const TableDescriptor* table = schema.value()->tableByName(*node.table);
+  if (table == nullptr) {
     return Status::InvalidState;
   }
-  const TableDescriptor* table = schema->second->tableByName(*node.table);
   Result<FacetMap> readable = readableFacets(node, *table, keyFor);
   if (!readable.ok()) {
     return readable.status();

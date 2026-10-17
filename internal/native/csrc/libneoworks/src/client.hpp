@@ -59,12 +59,6 @@ struct RowReference {
   std::string schemaVersion;
 };
 
-// A schema version of a collection whose descriptor this client does not hold yet.
-struct DescriptorNeed {
-  std::string collection;
-  std::string version;
-};
-
 enum class PinState { New, Match, Changed };
 
 struct ShareRequest {
@@ -191,6 +185,17 @@ class Client {
   // without a recorded version are not listed.
   Result<std::vector<RowReference>> rowsBelow(const std::string& collection, const std::string& table,
                                               const std::string& version) const;
+  // The live rows of `collection` that are readable here but out of the query index, because they
+  // were written at an earlier version on another compatibility line than the registered one, in id
+  // order. Their field ordinals do not mean what the registered descriptor says, so the index needs
+  // their content migrated to the registered version: see indexMigrated.
+  std::vector<RowReference> rowsAwaitingMigratedIndex(const std::string& collection) const;
+  // Puts a row listed by rowsAwaitingMigratedIndex into the query index with `content`, the row's
+  // content migrated to the registered version in the shape readNode returns it, without writing
+  // the row. The entry lasts until the row changes, is rewritten or leaves this holder's reach; a
+  // row that changed is listed again. InvalidState: the row is not awaiting an entry.
+  // InvalidArgument: the content is not an object.
+  Status indexMigrated(const std::string& nodeId, const Json& content);
   // The table of a row, by model name; nullopt for roots and rows this holder does not have.
   std::optional<std::string> tableOf(const std::string& nodeId) const;
   // Decrypts a version (the JSON object of GET /nodes/{id}/versions) of a node this client
@@ -307,6 +312,8 @@ class Client {
   void indexPendingNodes();
   void resetIndexOf(const std::string& collection);
   Result<IndexedNode> indexEntryFor(const Node& node);
+  // Lists a row of an earlier compatibility line as awaiting migrated content once it is readable.
+  void awaitMigratedIndex(const Node& node);
   Status acceptPulledRevocation(const AccessGrant& grant);
 
   // The schema a row is read with: the registered one for a row written at its version, the
@@ -321,6 +328,8 @@ class Client {
   // Whether the row's field ordinals mean what the registered descriptor says: it was written at
   // that version or below it on the same compatibility line.
   bool sharesFieldsWithRegistered(const Node& node) const;
+  // Whether the row was written below the registered version on an earlier compatibility line.
+  bool isOnEarlierLine(const Node& node) const;
   std::set<std::string> versionsBelowRegistered(const std::string& collection) const;
   // How a change to a row is written: the stored content is read with `storedTable`, the version
   // that wrote the row, and the new content is encoded with `writeTable` of `writeVersion`.
@@ -425,6 +434,8 @@ class Client {
   FieldIndex index_;
   // Nodes not in the index because they cannot be read yet.
   std::set<std::string> unindexedNodeIds_;
+  // Readable rows of an earlier compatibility line, which wait for indexMigrated.
+  std::set<std::string> awaitingMigratedIndexIds_;
   // Rows whose key is being looked up through the rows linking to them, so a cycle of links ends.
   std::set<std::string> rowsResolvingThroughLinks_;
 #if defined(NW_ENABLE_TEST_HOOKS)

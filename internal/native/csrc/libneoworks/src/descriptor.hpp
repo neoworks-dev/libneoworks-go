@@ -181,4 +181,10 @@ uint32_t facetTagForName(std::string_view facetName);
 // that is not a single reference to a table of the schema.
 Result<std::shared_ptr<const SchemaDescriptor>> parseDescriptor(std::string_view text);
 
+// A schema version of a collection whose descriptor a reader does not hold yet.
+struct DescriptorNeed {
+  std::string collection;
+  std::string version;
+};
+
 }  // namespace nw

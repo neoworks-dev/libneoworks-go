@@ -277,6 +277,18 @@ NW_API int nw_client_descriptor_text(nw_client* client, const char* collection, 
  * [{"id", "schemaVersion"}] in id order. Rows that record no version are not listed. */
 NW_API int nw_client_rows_below(nw_client* client, const char* collection, const char* table,
                                 const char* version, nw_buffer* json);
+/* The live rows of collection that are readable but out of the query index, because they were
+ * written at a schema version below the registered one on an earlier compatibility line (their field
+ * ordinals differ), as [{"id", "schemaVersion"}] in id order. Migrate each row's content to the
+ * registered version and hand it to nw_client_index_migrated to have nw_client_query find the row. A
+ * row that changes is listed again. */
+NW_API int nw_client_rows_awaiting_index(nw_client* client, const char* collection, nw_buffer* json);
+/* Puts a row listed by nw_client_rows_awaiting_index into the query index with content_json, the row's
+ * content migrated to the registered version in the shape nw_client_read_node returns, without
+ * writing the row. The entry lasts until the row changes, is rewritten or leaves the client's reach.
+ * NW_ERR_INVALID_STATE: the row is not waiting for an entry. NW_ERR_MALFORMED: not JSON.
+ * NW_ERR_INVALID_ARGUMENT: not an object. */
+NW_API int nw_client_index_migrated(nw_client* client, const char* node_id, const char* content_json);
 /* Reads an older version of a node this client holds. `version_json` is one entry of
  * GET /nodes/{id}/versions. Writes {"content": {...}, "verified": bool, "authorType", "authorId",
  * "seq", "deleted", "createdAt"}. NW_ERR_NOT_FOUND: no key for the node;
@@ -352,9 +364,24 @@ NW_API int nw_client_revoke_link(nw_client* client, const char* link_id);
  * pull_json is the GET /links/{id}/pull response. */
 NW_API int nw_link_open(const char* pull_json, const char* fragment_key, nw_link_reader** out);
 NW_API int nw_link_list(nw_link_reader* reader, nw_buffer* json);
-/* The descriptor link nodes of the collection are read with; no registry check for reading. */
-NW_API int nw_link_set_descriptor(nw_link_reader* reader, const char* collection, const char* descriptor_json);
-/* As nw_client_read_node. */
+/* The descriptor link nodes of the collection are read with, at schema_version ("x.y.z"), the
+ * version of the app reading; no registry check for reading. Rows written at that version, and rows
+ * that record none, are read with it; rows written below it need the descriptor of their own version
+ * (nw_link_missing_descriptors). NW_ERR_INVALID_ARGUMENT: not a valid version. */
+NW_API int nw_link_set_descriptor(nw_link_reader* reader, const char* collection, const char* descriptor_json,
+                                  const char* schema_version);
+/* The schema versions below the registered one that rows were written at and whose descriptors the
+ * reader does not hold, as [{"collection", "version"}]. Fetch each as nw_sync does: the hashes of the
+ * published versions from GET /api/v1/schemas/{scope}/{name}, then the descriptor bytes from
+ * .../descriptors/{hash}, and hand them to nw_link_accept_descriptor. */
+NW_API int nw_link_missing_descriptors(nw_link_reader* reader, nw_buffer* json);
+/* Keeps the descriptor bytes of a published version once they hash (BLAKE2b-256, base64url) to
+ * descriptor_hash, the hash the registry publishes for that version. NW_ERR_AUTHENTICATION_FAILED:
+ * the hash differs. NW_ERR_MALFORMED: not a valid descriptor. */
+NW_API int nw_link_accept_descriptor(nw_link_reader* reader, const char* collection, const char* version,
+                                     const char* descriptor_hash, const uint8_t* text, size_t text_length);
+/* As nw_client_read_node. NW_ERR_UNSUPPORTED: the row was written at a version above the one set.
+ * NW_ERR_INVALID_STATE: the descriptor of the row's version is not held. */
 NW_API int nw_link_read_node(nw_link_reader* reader, const char* node_id, nw_buffer* json);
 NW_API void nw_link_free(nw_link_reader* reader);
 

@@ -23,6 +23,7 @@ IndexedNode indexedNodeOf(const TableDescriptor& descriptor, const Json& content
 
 void Client::attachIndex() {
   unindexedNodeIds_.clear();
+  awaitingMigratedIndexIds_.clear();
   for (const std::string& nodeId : database_->allNodeIds()) {
     unindexedNodeIds_.insert(nodeId);
   }
@@ -63,7 +64,7 @@ std::vector<std::string> Client::dependentsOf(const std::string& nodeId) const {
 
 // Also makes the table's sorted indexes exist, so that putting the entry places the row in them.
 // Unsupported: the row was written at a version whose field ordinals the registered descriptor and
-// its queries do not share, so it stays out of the index until it is written at the registered version.
+// its queries do not share. Such a row is indexed from migrated content, see indexMigrated.
 Result<IndexedNode> Client::indexEntryFor(const Node& node) {
   if (!sharesFieldsWithRegistered(node)) {
     return Status::Unsupported;
@@ -87,6 +88,7 @@ Result<IndexedNode> Client::indexEntryFor(const Node& node) {
 // A node that cannot be read yet stays pending and is tried again once keys, grants,
 // ancestors or the collection's descriptor arrive.
 void Client::indexNode(const std::string& nodeId) {
+  awaitingMigratedIndexIds_.erase(nodeId);
   const Node* node = database_->findNode(nodeId);
   if (node == nullptr || node->deleted || isRoot(*node)) {
     index_.erase(nodeId);
@@ -94,6 +96,11 @@ void Client::indexNode(const std::string& nodeId) {
     return;
   }
   CodecError callerError = lastContentError_;
+  if (isOnEarlierLine(*node)) {
+    awaitMigratedIndex(*node);
+    lastContentError_ = callerError;
+    return;
+  }
   Result<IndexedNode> entry = indexEntryFor(*node);
   lastContentError_ = callerError;
   if (entry.ok()) {
@@ -109,6 +116,53 @@ void Client::indexNode(const std::string& nodeId) {
   unindexedNodeIds_.insert(nodeId);
 }
 
+// The entry is made by indexMigrated; until then the row is out of the index.
+void Client::awaitMigratedIndex(const Node& node) {
+  index_.erase(node.id);
+  Result<StoredContent> readable = readStoredContent(node, nullptr);
+  if (readable.ok()) {
+    awaitingMigratedIndexIds_.insert(node.id);
+    unindexedNodeIds_.erase(node.id);
+    return;
+  }
+  if (readable.status() == Status::IntegrityFailure) {
+    unindexedNodeIds_.erase(node.id);
+    return;
+  }
+  unindexedNodeIds_.insert(node.id);
+}
+
+std::vector<RowReference> Client::rowsAwaitingMigratedIndex(const std::string& collection) const {
+  std::vector<RowReference> rows;
+  for (const std::string& nodeId : awaitingMigratedIndexIds_) {
+    const Node* node = database_->findNode(nodeId);
+    if (node->collection == collection) {
+      rows.push_back(RowReference{nodeId, *node->schemaVersion});
+    }
+  }
+  return rows;
+}
+
+Status Client::indexMigrated(const std::string& nodeId, const Json& content) {
+  if (awaitingMigratedIndexIds_.count(nodeId) == 0) {
+    lastContentError_ = contentError(Status::InvalidState, nodeId, "the row is not waiting for migrated content to be indexed");
+    return Status::InvalidState;
+  }
+  if (!content.is_object()) {
+    lastContentError_ = contentError(Status::InvalidArgument, nodeId, "the migrated content is not an object");
+    return Status::InvalidArgument;
+  }
+  const Node& node = *database_->findNode(nodeId);
+  Result<const TableDescriptor*> table = tableDescriptorFor(node.collection, *node.table);
+  if (!table.ok()) {
+    return table.status();
+  }
+  index_.defineIndexes(node.collection, table.value()->modelName, table.value()->indexes);
+  index_.put(node.collection, nodeId, indexedNodeOf(*table.value(), content));
+  awaitingMigratedIndexIds_.erase(nodeId);
+  return Status::Ok;
+}
+
 void Client::indexPendingNodes() {
   std::vector<std::string> pending(unindexedNodeIds_.begin(), unindexedNodeIds_.end());
   for (const std::string& nodeId : pending) {
@@ -119,6 +173,7 @@ void Client::indexPendingNodes() {
 void Client::resetIndexOf(const std::string& collection) {
   index_.eraseCollection(collection);
   for (const std::string& nodeId : database_->nodesInCollection(collection)) {
+    awaitingMigratedIndexIds_.erase(nodeId);
     unindexedNodeIds_.insert(nodeId);
   }
 }

@@ -95,6 +95,17 @@ Result<std::unique_ptr<LocalDatabase>> openDatabase(const char* sqlitePath, cons
 
 // ---- JSON shapes ----
 
+Json rowReferencesJson(const std::vector<RowReference>& rows) {
+  Json list = Json::array();
+  for (const RowReference& row : rows) {
+    Json entry = Json::object();
+    entry["id"] = row.id;
+    entry["schemaVersion"] = row.schemaVersion;
+    list.push_back(entry);
+  }
+  return list;
+}
+
 Json nodeSummary(Client& client, const LocalNode& local) {
   const Node& node = local.node;
   Json json = Json::object();
@@ -521,14 +532,27 @@ int nw_client_rows_below(nw_client* client, const char* collection, const char* 
     if (!rows.ok()) {
       return code(rows.status());
     }
-    Json list = Json::array();
-    for (const RowReference& row : rows.value()) {
-      Json entry = Json::object();
-      entry["id"] = row.id;
-      entry["schemaVersion"] = row.schemaVersion;
-      list.push_back(entry);
+    return fillJson(json, rowReferencesJson(rows.value()));
+  });
+}
+
+int nw_client_rows_awaiting_index(nw_client* client, const char* collection, nw_buffer* json) {
+  if (!hasArguments(client, collection) || json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] { return fillJson(json, rowReferencesJson(client->value->rowsAwaitingMigratedIndex(collection))); });
+}
+
+int nw_client_index_migrated(nw_client* client, const char* node_id, const char* content_json) {
+  if (!hasArguments(client, node_id) || content_json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    std::optional<Json> content = parseText(content_json);
+    if (!content.has_value()) {
+      return code(Status::Malformed);
     }
-    return fillJson(json, list);
+    return code(client->value->indexMigrated(node_id, *content));
   });
 }
 
@@ -854,11 +878,37 @@ int nw_link_list(nw_link_reader* reader, nw_buffer* json) {
   });
 }
 
-int nw_link_set_descriptor(nw_link_reader* reader, const char* collection, const char* descriptor_json) {
-  if (reader == nullptr || collection == nullptr || descriptor_json == nullptr) {
+int nw_link_set_descriptor(nw_link_reader* reader, const char* collection, const char* descriptor_json,
+                           const char* schema_version) {
+  if (reader == nullptr || collection == nullptr || descriptor_json == nullptr || schema_version == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] { return code(reader->value->setDescriptor(collection, descriptor_json)); });
+  return guarded([&] { return code(reader->value->setDescriptor(collection, descriptor_json, schema_version)); });
+}
+
+int nw_link_missing_descriptors(nw_link_reader* reader, nw_buffer* json) {
+  if (reader == nullptr || json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    Json list = Json::array();
+    for (const DescriptorNeed& need : reader->value->missingDescriptors()) {
+      list.push_back(Json::object({{"collection", need.collection}, {"version", need.version}}));
+    }
+    return fillJson(json, list);
+  });
+}
+
+int nw_link_accept_descriptor(nw_link_reader* reader, const char* collection, const char* version,
+                              const char* descriptor_hash, const uint8_t* text, size_t text_length) {
+  if (reader == nullptr || collection == nullptr || version == nullptr || descriptor_hash == nullptr ||
+      (text == nullptr && text_length > 0)) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    Bytes bytes(text, text + text_length);
+    return code(reader->value->acceptPublishedDescriptor(DescriptorNeed{collection, version}, descriptor_hash, bytes));
+  });
 }
 
 int nw_link_read_node(nw_link_reader* reader, const char* node_id, nw_buffer* json) {

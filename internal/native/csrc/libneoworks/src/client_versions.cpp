@@ -134,6 +134,16 @@ bool Client::sharesFieldsWithRegistered(const Node& node) const {
   return written.has_value() && *written <= current && compatibilityLine(*written) == compatibilityLine(current);
 }
 
+bool Client::isOnEarlierLine(const Node& node) const {
+  auto registered = descriptors_.find(node.collection);
+  if (registered == descriptors_.end() || !node.schemaVersion.has_value()) {
+    return false;
+  }
+  std::optional<Semver> written = parseSemverText(*node.schemaVersion);
+  Semver current = *parseSemverText(registered->second.schemaVersion);
+  return written.has_value() && *written < current && compatibilityLine(*written) != compatibilityLine(current);
+}
+
 // ── Fetching descriptors of earlier versions ──────────────────────────────────
 
 std::set<std::string> Client::versionsBelowRegistered(const std::string& collection) const {
