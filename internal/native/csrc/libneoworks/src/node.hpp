@@ -118,7 +118,7 @@ Bytes encryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view obje
 Result<Bytes> decryptBlobChunk(const SymmetricKey& objectKeyValue, std::string_view objectId, uint32_t index,
                                bool finalChunk, ByteView boxed);
 
-// "nw-node-write-v4" when the node carries a schema version, else "nw-node-write-v3".
+// "nw-node-write-v4".
 Bytes nodeWriteMessage(const Node& node);
 // Sets node.signature.
 Status signNodeWrite(ByteView signSecret, Node& node);
