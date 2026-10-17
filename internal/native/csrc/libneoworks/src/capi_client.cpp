@@ -448,11 +448,17 @@ int nw_client_update_node(nw_client* client, const char* request_json) {
   });
 }
 
-int nw_client_delete_node(nw_client* client, const char* node_id) {
-  if (!hasArguments(client, node_id)) {
+int nw_client_delete_node(nw_client* client, const char* node_id, nw_buffer* deleted_ids) {
+  if (!hasArguments(client, node_id) || deleted_ids == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] { return code(client->value->deleteNode(node_id)); });
+  return guarded([&] {
+    Result<std::vector<std::string>> deleted = client->value->deleteNode(node_id);
+    if (!deleted.ok()) {
+      return code(deleted.status());
+    }
+    return fillJson(deleted_ids, Json(deleted.value()));
+  });
 }
 
 int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json) {

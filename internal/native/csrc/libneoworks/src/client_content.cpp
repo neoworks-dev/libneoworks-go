@@ -357,7 +357,7 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   return signAndStore(node);
 }
 
-Status Client::deleteNode(const std::string& nodeId) {
+Result<std::vector<std::string>> Client::deleteNode(const std::string& nodeId) {
   const LocalNode* local = database_->findLocal(nodeId);
   if (local == nullptr) {
     return Status::NotFound;
@@ -365,24 +365,28 @@ Status Client::deleteNode(const std::string& nodeId) {
   if (roleRank(effectiveRole(nodeId)) < roleRank("write")) {
     return Status::Forbidden;
   }
-  std::set<std::string> deleted;
-  return deleteRow(nodeId, deleted);
+  DeletionPass pass;
+  Status deleted = deleteRow(nodeId, pass);
+  if (deleted != Status::Ok) {
+    return deleted;
+  }
+  return std::move(pass.deletedIds);
 }
 
-Status Client::deleteRow(const std::string& nodeId, std::set<std::string>& deleted) {
-  if (!deleted.insert(nodeId).second) {
+Status Client::deleteRow(const std::string& nodeId, DeletionPass& pass) {
+  if (!pass.visited.insert(nodeId).second) {
     return Status::Ok;
   }
   const LocalNode* local = database_->findLocal(nodeId);
   if (local == nullptr || local->node.deleted) {
     return Status::Ok;
   }
-  Status linkersDeleted = deleteCascadingLinkers(nodeId, deleted);
+  Status linkersDeleted = deleteCascadingLinkers(nodeId, pass);
   if (linkersDeleted != Status::Ok) {
     return linkersDeleted;
   }
   for (const std::string& childId : database_->childrenOf(nodeId)) {
-    Status childDeleted = deleteRow(childId, deleted);
+    Status childDeleted = deleteRow(childId, pass);
     if (childDeleted != Status::Ok) {
       return childDeleted;
     }
@@ -394,19 +398,23 @@ Status Client::deleteRow(const std::string& nodeId, std::set<std::string>& delet
   node.files.clear();
   node.links.clear();
   node.updatedAt = nowText();
-  return signAndStore(node);
+  Status stored = signAndStore(node);
+  if (stored == Status::Ok) {
+    pass.deletedIds.push_back(nodeId);
+  }
+  return stored;
 }
 
 // Rows linking to the target through a cascading reference go with it, where this holder may write
 // them; the others keep a dead link until someone who may write them removes it.
-Status Client::deleteCascadingLinkers(const std::string& targetId, std::set<std::string>& deleted) {
+Status Client::deleteCascadingLinkers(const std::string& targetId, DeletionPass& pass) {
   for (const std::string& linkerId : database_->linkersOf(targetId)) {
     const Node* linker = database_->findNode(linkerId);
     bool writable = linker != nullptr && !linker->deleted && roleRank(effectiveRole(linkerId)) >= roleRank("write");
     if (!writable || !cascadesFrom(*linker, targetId)) {
       continue;
     }
-    Status linkerDeleted = deleteRow(linkerId, deleted);
+    Status linkerDeleted = deleteRow(linkerId, pass);
     if (linkerDeleted != Status::Ok) {
       return linkerDeleted;
     }

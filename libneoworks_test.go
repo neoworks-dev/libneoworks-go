@@ -147,6 +147,14 @@ func TestNodeOperationsNeedAGrant(t *testing.T) {
 	}
 }
 
+func TestDeletingAnUnknownNodeListsNothing(t *testing.T) {
+	client := newTestClient(t)
+	deletedIDs, err := client.DeleteNode("00000000-0000-0000-0000-000000000000")
+	if !errors.Is(err, StatusNotFound) || deletedIDs != nil {
+		t.Fatalf("deleting an unknown node: got %v %v, want %v", deletedIDs, err, StatusNotFound)
+	}
+}
+
 func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 	client := newTestClient(t)
 	collection := "@neoworks/calendar"

@@ -247,8 +247,10 @@ NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw
  * other gets a new one. The @belongsTo field cannot change. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 /* Deletes the row, every row belonging to it, and every row linking to it through an
- * @onDelete("cascade") reference that this client may write. */
-NW_API int nw_client_delete_node(nw_client* client, const char* node_id);
+ * @onDelete("cascade") reference that this client may write. Writes the ids of the rows it
+ * deleted as a JSON array, each row after the rows deleted with it and the requested row last;
+ * a row that was already deleted is not listed. */
+NW_API int nw_client_delete_node(nw_client* client, const char* node_id, nw_buffer* deleted_ids);
 /* Writes the fields of the facets this client can open as one JSON object; a reference reads as the
  * id of its row. Roots read as {}. NW_ERR_NOT_FOUND: no such node or no facet this client can open. NW_ERR_INTEGRITY: the
  * node's file list does not match the File values in its content; the node is then reported as an

@@ -132,8 +132,10 @@ class Client {
   // A given field replaces the stored value; the @belongsTo field cannot change.
   Status updateNode(const UpdateNodeRequest& request);
   // Deletes the row, the rows belonging to it, and the rows linking to it through an
-  // @onDelete("cascade") reference that this holder may write.
-  Status deleteNode(const std::string& nodeId);
+  // @onDelete("cascade") reference that this holder may write. Returns the ids of the rows it
+  // deleted, each row after the rows deleted with it and the requested row last; a row that was
+  // already deleted is not listed.
+  Result<std::vector<std::string>> deleteNode(const std::string& nodeId);
   // Re-signs the local pending edit on top of a newer server version (last-writer-wins).
   Status rebaseLocalNode(const std::string& nodeId, const Node& remote);
   // The fields of the facets this client can open; a reference reads as the id of its row. Roots
@@ -299,8 +301,12 @@ class Client {
   std::string actingUserId() const;
   Result<std::string> createRoot(const CreateNodeRequest& request);
   Result<std::string> createRow(const CreateNodeRequest& request);
-  Status deleteRow(const std::string& nodeId, std::set<std::string>& deleted);
-  Status deleteCascadingLinkers(const std::string& targetId, std::set<std::string>& deleted);
+  struct DeletionPass {
+    std::set<std::string> visited;
+    std::vector<std::string> deletedIds;
+  };
+  Status deleteRow(const std::string& nodeId, DeletionPass& pass);
+  Status deleteCascadingLinkers(const std::string& targetId, DeletionPass& pass);
   // Whether `linker` refers to `targetId` through a reference marked @onDelete("cascade").
   bool cascadesFrom(const Node& linker, const std::string& targetId);
   Status signAndStore(Node& node);

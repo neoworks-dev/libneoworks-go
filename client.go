@@ -208,13 +208,24 @@ func (client *Client) UpdateNode(update NodeUpdate) error {
 }
 
 // DeleteNode deletes a row, the rows that belong to it, and the rows that link
-// to it through a cascading reference where this client may write them.
-func (client *Client) DeleteNode(nodeID string) error {
+// to it through a cascading reference where this client may write them. It
+// returns the ids of the rows it deleted, each after the rows deleted with it
+// and the requested row last; a row that was already deleted is not listed.
+func (client *Client) DeleteNode(nodeID string) ([]string, error) {
 	idText := cString(nodeID)
 	defer freeString(idText)
+	var buffer C.nw_buffer
 	client.mutex.Lock()
-	defer client.mutex.Unlock()
-	return check(C.nw_client_delete_node(client.native, idText))
+	err := check(C.nw_client_delete_node(client.native, idText, &buffer))
+	client.mutex.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var deletedIDs []string
+	if err := json.Unmarshal(takeBuffer(&buffer), &deletedIDs); err != nil {
+		return nil, fmt.Errorf("deleted ids: %w", err)
+	}
+	return deletedIDs, nil
 }
 
 // ReadNode returns the fields of the node this client can open, as JSON.
