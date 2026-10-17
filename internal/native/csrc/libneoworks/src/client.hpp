@@ -119,11 +119,14 @@ class Client {
                            const std::vector<IdentityVersion>& ownerHistory = {});
   Status restoreKeysFromDatabase();
 
-  // Sets the descriptor this client reads and writes `collection` with. Returns the registry
+  // Sets the descriptor this client reads and writes `collection` with, and the schema version
+  // ("major.minor.patch") every node whose content it encodes records. Returns the registry
   // request that confirms it is a published version of the collection's schema, or nullopt
-  // when that was confirmed before. Malformed: not a valid descriptor.
+  // when that was confirmed before. Malformed: not a valid descriptor. InvalidArgument: not a
+  // valid version.
   Result<std::optional<DescriptorCheck>> registerDescriptor(const std::string& collection,
-                                                           std::string_view descriptorText);
+                                                           std::string_view descriptorText,
+                                                           std::string_view schemaVersion);
   // AuthenticationFailed: the registry does not publish exactly these bytes.
   Status completeDescriptorCheck(const std::string& collection, const HttpResponse& response);
   // The descriptor of `collection` once confirmed, nullptr before.
@@ -320,6 +323,8 @@ class Client {
   Status refreshKeys(const std::string& nodeId, RotationReport& report);
   // Writes `change` to an exposed node under a new key; false when the node is not exposed.
   Result<bool> writeUnderNewKey(const std::string& nodeId, const ContentChange& change);
+  // Records the registered schema version on a node whose content this client just encoded.
+  void stampSchemaVersion(Node& node) const;
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
   // Writes and queues the grant described by `request`; the caller checked the right to share.
   Result<AccessGrant> grantNode(const ShareRequest& request);
@@ -334,6 +339,7 @@ class Client {
     std::shared_ptr<const SchemaDescriptor> schema;
     std::string descriptorHash;
     Bytes text;
+    std::string schemaVersion;
     bool confirmed = false;
   };
 

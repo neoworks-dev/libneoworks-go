@@ -268,6 +268,7 @@ Status Client::rotateNode(const std::string& nodeId, const std::string& removedT
   if (change != nullptr) {
     step.value().plaintexts = change->plaintexts;
     step.value().node.files = change->files;
+    stampSchemaVersion(step.value().node);
   }
   Status kept = appendKeyHistory(step.value().plaintexts, node->epoch, step.value().oldKey);
   if (kept != Status::Ok) {

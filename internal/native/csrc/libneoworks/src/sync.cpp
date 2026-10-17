@@ -238,6 +238,9 @@ void SyncSession::applyPushResult(const PushResult& result) {
     client_.database().markRejected(result.id);
     report_.forbiddenNodeIds.push_back(result.id);
   }
+  if (result.requiredSchemaVersion.has_value()) {
+    report_.outdatedNodes.emplace_back(result.id, *result.requiredSchemaVersion);
+  }
 }
 
 Status SyncSession::handlePushResponse(const HttpResponse& response) {

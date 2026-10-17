@@ -115,7 +115,7 @@ func TestInstallSealsAndOpensUnderTheKeystore(t *testing.T) {
 func TestDescriptorCheckAcceptsOnlyThePublishedBytes(t *testing.T) {
 	client := newTestClient(t)
 	descriptor := readDescriptor(t)
-	request, err := client.RegisterDescriptor("@neoworks/calendar", descriptor)
+	request, err := client.RegisterDescriptor("@neoworks/calendar", descriptor, "1.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestDescriptorCheckAcceptsOnlyThePublishedBytes(t *testing.T) {
 	if !errors.Is(err, StatusAuthenticationFailed) {
 		t.Fatalf("other bytes: got %v, want %v", err, StatusAuthenticationFailed)
 	}
-	if _, err := client.RegisterDescriptor("@neoworks/calendar", descriptor); err != nil {
+	if _, err := client.RegisterDescriptor("@neoworks/calendar", descriptor, "1.0.0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CompleteDescriptorCheck("@neoworks/calendar", 200, descriptor); err != nil {
@@ -154,7 +154,7 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 		t.Fatalf("before the descriptor is confirmed: got %v, want %v", err, StatusInvalidState)
 	}
 	descriptor := readDescriptor(t)
-	if _, err := client.RegisterDescriptor(collection, descriptor); err != nil {
+	if _, err := client.RegisterDescriptor(collection, descriptor, "1.0.0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.CompleteDescriptorCheck(collection, 200, descriptor); err != nil {
@@ -197,15 +197,15 @@ const fileDescriptor = `{"descriptorVersion":1,"namespace":"neoworks.photos","en
 
 func TestDescriptorsMayDeclareFileFieldsAndRejectOtherFileShapes(t *testing.T) {
 	client := newTestClient(t)
-	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(fileDescriptor)); err != nil {
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(fileDescriptor), "1.0.0"); err != nil {
 		t.Fatalf("a descriptor with File fields: %v", err)
 	}
 	named := strings.Replace(fileDescriptor, `"value":{"kind":"file"},"required":true`, `"value":{"kind":"file","name":"File"},"required":true`, 1)
-	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(named)); !errors.Is(err, StatusMalformed) {
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(named), "1.0.0"); !errors.Is(err, StatusMalformed) {
 		t.Fatalf("a File value with a name: got %v", err)
 	}
 	asset := strings.Replace(fileDescriptor, `"kind":"item","model"`, `"kind":"asset","model"`, 1)
-	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(asset)); !errors.Is(err, StatusMalformed) {
+	if _, err := client.RegisterDescriptor("@neoworks/photos", []byte(asset), "1.0.0"); !errors.Is(err, StatusMalformed) {
 		t.Fatalf("the asset node kind: got %v", err)
 	}
 }

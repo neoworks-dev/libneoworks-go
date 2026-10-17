@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,6 +28,9 @@ struct PushResult {
   std::string id;
   Outcome outcome = Outcome::Forbidden;
   uint64_t seq = 0;
+  // Set on a forbidden write of a row older than its owner's finished migration
+  // (reason "schema_outdated"): the schema version the app has to update to.
+  std::optional<std::string> requiredSchemaVersion;
 };
 // GET /nodes/{id}/access-log: {"entries": [...]} or a bare array.
 Result<std::vector<AccessLogEntry>> parseAccessLogResponse(ByteView body);

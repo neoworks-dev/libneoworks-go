@@ -121,16 +121,19 @@ func (client *Client) AcceptGrant(grant, ownerIdentity json.RawMessage) error {
 }
 
 // RegisterDescriptor sets the descriptor a collection is read and written
-// with. It returns the registry request that confirms it, or nil when the
-// registry confirmed these bytes before.
-func (client *Client) RegisterDescriptor(collection string, descriptor []byte) (*Request, error) {
+// with, and its schema version "major.minor.patch", which every node whose
+// content the client encodes records. It returns the registry request that
+// confirms the descriptor, or nil when the registry confirmed these bytes before.
+func (client *Client) RegisterDescriptor(collection string, descriptor []byte, schemaVersion string) (*Request, error) {
 	collectionText := cString(collection)
 	defer freeString(collectionText)
 	descriptorText := cString(string(descriptor))
 	defer freeString(descriptorText)
+	versionText := cString(schemaVersion)
+	defer freeString(versionText)
 	var buffer C.nw_buffer
 	client.mutex.Lock()
-	err := check(C.nw_client_register_descriptor(client.native, collectionText, descriptorText, &buffer))
+	err := check(C.nw_client_register_descriptor(client.native, collectionText, descriptorText, versionText, &buffer))
 	client.mutex.Unlock()
 	if err != nil {
 		return nil, err

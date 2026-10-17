@@ -43,9 +43,18 @@ type SyncReport struct {
 	GrantsApplied     int      `json:"grantsApplied"`
 	FullResync        bool     `json:"fullResync"`
 	ForbiddenNodeIDs  []string `json:"forbiddenNodeIds"`
-	Failure           string   `json:"failure"`
+	// OutdatedNodes are the forbidden rows the server refused because their owner
+	// migrated past the schema version this client writes.
+	OutdatedNodes []OutdatedNode `json:"outdatedNodes"`
+	Failure       string         `json:"failure"`
 	// FailureCode is zero when the run succeeded.
 	FailureCode Status `json:"failureCode"`
+}
+
+// OutdatedNode is a row refused for an outdated schema, and the version to update to.
+type OutdatedNode struct {
+	NodeID          string `json:"nodeId"`
+	RequiredVersion string `json:"requiredVersion"`
 }
 
 // Sync pushes local changes and pulls remote ones, performing the requests

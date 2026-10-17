@@ -186,6 +186,11 @@ Json reportJson(const SyncReport& report) {
   json["sharingOperationsSent"] = report.sharingOperationsSent;
   json["fullResync"] = report.fullResync;
   json["forbiddenNodeIds"] = report.forbiddenNodeIds;
+  Json outdated = Json::array();
+  for (const auto& [nodeId, requiredVersion] : report.outdatedNodes) {
+    outdated.push_back(Json::object({{"nodeId", nodeId}, {"requiredVersion", requiredVersion}}));
+  }
+  json["outdatedNodes"] = outdated;
   json["integrityFailures"] = report.integrityFailures;
   Json conflicts = Json::array();
   for (const PinConflict& conflict : report.pinConflicts) {
@@ -336,12 +341,14 @@ int nw_client_store_renewal_certificate(nw_client* client, const uint8_t* renewa
 }
 
 int nw_client_register_descriptor(nw_client* client, const char* collection, const char* descriptor_json,
-                                  nw_buffer* check_json) {
-  if (!hasArguments(client, collection) || descriptor_json == nullptr || check_json == nullptr) {
+                                  const char* schema_version, nw_buffer* check_json) {
+  if (!hasArguments(client, collection) || descriptor_json == nullptr || schema_version == nullptr ||
+      check_json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    Result<std::optional<DescriptorCheck>> check = client->value->registerDescriptor(collection, descriptor_json);
+    Result<std::optional<DescriptorCheck>> check =
+        client->value->registerDescriptor(collection, descriptor_json, schema_version);
     if (!check.ok()) {
       return code(check.status());
     }
