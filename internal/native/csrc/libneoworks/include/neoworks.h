@@ -241,10 +241,16 @@ NW_API int nw_client_last_content_error(nw_client* client, nw_buffer* json);
  * object id is used by more than one file of the row, see nw_client_last_content_error.
  * NW_ERR_NOT_FOUND: a referenced row is not readable here, or there is no root to put it under. */
 NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw_buffer* node_id);
-/* request: {"nodeId": id, "changes": {...}}. A field in changes replaces the stored value, null
- * clears it, and fields not given keep their value. The row's file list and links follow its File
- * values and references. A File value with an object id the row holds keeps that file's key; any
- * other gets a new one. The @belongsTo field cannot change. */
+/* request: {"nodeId": id, "changes": {...}, "schemaVersion": "x.y.z"?}. A field in changes
+ * replaces the stored value, null clears it, and fields not given keep their value. The row's file
+ * list and links follow its File values and references. A File value with an object id the row
+ * holds keeps that file's key; any other gets a new one. The @belongsTo field cannot change.
+ * A row written at another schema version than the one registered for its collection can only be
+ * changed with "schemaVersion", the version to write it at, which is not below the row's own and
+ * not above the registered one. Then changes is the row's whole content in that version's shape,
+ * encoded with that version's descriptor, and fields it leaves out are unset (a migrated write).
+ * NW_ERR_INVALID_STATE: the row is at another version and no schemaVersion is given, or the
+ * descriptor of a version involved is not loaded yet (nw_client_read_row, nw_sync_begin). */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 /* Deletes the row, every row belonging to it, and every row linking to it through an
  * @onDelete("cascade") reference that this client may write. Writes the ids of the rows it
@@ -256,6 +262,16 @@ NW_API int nw_client_delete_node(nw_client* client, const char* node_id, nw_buff
  * node's file list does not match the File values in its content; the node is then reported as an
  * integrity failure by nw_sync_report. */
 NW_API int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json);
+/* As nw_client_read_node, with the schema version that wrote the row:
+ * {"schemaVersion": "x.y.z"|null, "content": {...}}. The content is in the shape of that
+ * version, which may be below the registered one; the descriptor of that version is fetched by a
+ * sync. NW_ERR_UNSUPPORTED: the row was written at a version above the registered one.
+ * NW_ERR_INVALID_STATE: the descriptor of the row's version is not loaded yet. */
+NW_API int nw_client_read_row(nw_client* client, const char* node_id, nw_buffer* json);
+/* The live rows of table in collection that were written at a schema version below `version`, as
+ * [{"id", "schemaVersion"}] in id order. Rows that record no version are not listed. */
+NW_API int nw_client_rows_below(nw_client* client, const char* collection, const char* table,
+                                const char* version, nw_buffer* json);
 /* Reads an older version of a node this client holds. `version_json` is one entry of
  * GET /nodes/{id}/versions. Writes {"content": {...}, "verified": bool, "authorType", "authorId",
  * "seq", "deleted", "createdAt"}. NW_ERR_NOT_FOUND: no key for the node;
@@ -263,7 +279,8 @@ NW_API int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer
 NW_API int nw_client_read_version(nw_client* client, const char* version_json, nw_buffer* json);
 /* Node metadata without key material or ciphertext: {"id", "parentId", "ownerId", "collection",
  * "kind", "deleted", "seq", "baseSeq", "authorType", "authorId", "createdAt", "updatedAt",
- * "dirty", "rejected", "role", "table": name|null, "files", "links"}. "table" is null for roots. */
+ * "dirty", "rejected", "role", "table": name|null, "schemaVersion": "x.y.z"|null, "files",
+ * "links"}. "table" and "schemaVersion" are null for roots. */
 NW_API int nw_client_get_node(nw_client* client, const char* node_id, nw_buffer* json);
 /* parent_id and collection are optional filters (NULL = any). Returns a JSON array. */
 NW_API int nw_client_list_nodes(nw_client* client, const char* parent_id, const char* collection,

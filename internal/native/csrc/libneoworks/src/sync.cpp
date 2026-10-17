@@ -80,6 +80,23 @@ HttpRequest bodylessRequest(const std::string& method, const std::string& url) {
   return request;
 }
 
+// The version records of GET /api/v1/schemas/{scope}/{name}: `descriptorHash` by `version`.
+Result<std::map<std::string, std::string>> parsePublishedHashes(const Bytes& body) {
+  std::optional<Json> json = parseJson(std::string_view(reinterpret_cast<const char*>(body.data()), body.size()));
+  if (!json.has_value() || !json->is_object() || !json->contains("versions") || !json->at("versions").is_array()) {
+    return Status::Malformed;
+  }
+  std::map<std::string, std::string> hashes;
+  for (const Json& record : json->at("versions")) {
+    std::optional<std::string> version = readString(record, "version");
+    std::optional<std::string> descriptorHash = readString(record, "descriptorHash");
+    if (version.has_value() && descriptorHash.has_value()) {
+      hashes[*version] = *descriptorHash;
+    }
+  }
+  return hashes;
+}
+
 }  // namespace
 
 SyncSession::SyncSession(Client& client) : client_(client) { pullCursor_ = client.database().cursor(); }
@@ -163,6 +180,10 @@ Status SyncSession::handleResponse(const HttpResponse& response) {
     outcome = handleCertificateResponse(response);
   } else if (expected == Awaiting::AccessLog) {
     outcome = handleAccessLogResponse(response);
+  } else if (expected == Awaiting::SchemaRecord) {
+    outcome = handleSchemaRecordResponse(response);
+  } else if (expected == Awaiting::DescriptorText) {
+    outcome = handleDescriptorTextResponse(response);
   }
   if (outcome != Status::Ok) {
     finishWithFailure(outcome);
@@ -370,8 +391,7 @@ std::optional<HttpRequest> SyncSession::producePullRequest() {
   }
   if (!page_.has_value()) {
     if (pullDone_) {
-      advancePhase();
-      return std::nullopt;
+      return produceFrom(buildDescriptorRequest());
     }
     awaiting_ = Awaiting::PullPage;
     return buildPullRequest();
@@ -382,6 +402,64 @@ std::optional<HttpRequest> SyncSession::producePullRequest() {
   }
   applyPage();
   return std::nullopt;
+}
+
+// Rows written at an earlier schema version are read with that version's descriptor. It is
+// fetched by the hash the registry publishes for the version; a failure leaves those rows
+// unreadable until the next sync.
+std::optional<HttpRequest> SyncSession::buildDescriptorRequest() {
+  for (const DescriptorNeed& need : client_.missingDescriptors()) {
+    if (failedDescriptors_.count(need.collection + " " + need.version) > 0) {
+      continue;
+    }
+    std::optional<HttpRequest> request = descriptorRequestFor(need);
+    if (request.has_value()) {
+      fetchingDescriptor_ = need;
+      return request;
+    }
+    failedDescriptors_.insert(need.collection + " " + need.version);
+  }
+  return std::nullopt;
+}
+
+std::optional<HttpRequest> SyncSession::descriptorRequestFor(const DescriptorNeed& need) {
+  auto hashes = publishedHashes_.find(need.collection);
+  if (hashes == publishedHashes_.end() && failedSchemaRecords_.count(need.collection) == 0) {
+    awaiting_ = Awaiting::SchemaRecord;
+    return schemaRecordRequest(need.collection);
+  }
+  if (hashes == publishedHashes_.end() || hashes->second.count(need.version) == 0) {
+    return std::nullopt;
+  }
+  awaiting_ = Awaiting::DescriptorText;
+  return descriptorRequest(need.collection, hashes->second.at(need.version));
+}
+
+Status SyncSession::handleSchemaRecordResponse(const HttpResponse& response) {
+  DescriptorNeed need = *fetchingDescriptor_;
+  fetchingDescriptor_.reset();
+  Result<std::map<std::string, std::string>> hashes = Status::IoFailure;
+  if (isSuccess(response.status)) {
+    hashes = parsePublishedHashes(response.body);
+  }
+  if (!hashes.ok()) {
+    failedSchemaRecords_.insert(need.collection);
+    return Status::Ok;
+  }
+  publishedHashes_[need.collection] = hashes.take();
+  return Status::Ok;
+}
+
+Status SyncSession::handleDescriptorTextResponse(const HttpResponse& response) {
+  DescriptorNeed need = *fetchingDescriptor_;
+  fetchingDescriptor_.reset();
+  const std::string& descriptorHash = publishedHashes_.at(need.collection).at(need.version);
+  bool accepted = isSuccess(response.status) &&
+                  client_.acceptPublishedDescriptor(need, descriptorHash, response.body) == Status::Ok;
+  if (!accepted) {
+    failedDescriptors_.insert(need.collection + " " + need.version);
+  }
+  return Status::Ok;
 }
 
 std::optional<HttpRequest> SyncSession::buildPullRequest() {

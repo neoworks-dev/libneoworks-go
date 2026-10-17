@@ -24,6 +24,11 @@ struct Semver {
 std::optional<Semver> parseSemverText(std::string_view text);
 std::string semverText(const Semver& version);
 
+// The version's compatibility line in the sense of Cargo: the leftmost non-zero part with
+// everything to its right zeroed. Versions on one line stay compatible with each other; below 1.0.0
+// a new minor starts a new line, and below 0.1.0 every patch does.
+Semver compatibilityLine(const Semver& version);
+
 // The LEN body: exactly three varints, major then minor then patch.
 Bytes semverBody(const Semver& version);
 std::optional<Semver> semverFromBody(ByteView body);

@@ -28,8 +28,10 @@ bool holdsFile(const ModelDescriptor& model, const Json& content);
 
 // Gives every File value in `written`, the content an app writes, the key of the File with the
 // same object id in `stored`, the content the record holds now, or a new random key when there
-// is none. InvalidArgument when the app gives a key itself.
-Status assignFileKeys(const ModelDescriptor& model, Json& written, const Json& stored, CodecError& error);
+// is none. `written` is in the shape of `writtenModel` and `stored` in that of `storedModel`, which
+// differ when a row moves to another schema version. InvalidArgument when the app gives a key itself.
+Status assignFileKeys(const ModelDescriptor& writtenModel, const ModelDescriptor& storedModel, Json& written,
+                      const Json& stored, CodecError& error);
 
 // Takes the keys out of the File values of `content`, which is what an app may see.
 void removeFileKeys(const ModelDescriptor& model, Json& content);

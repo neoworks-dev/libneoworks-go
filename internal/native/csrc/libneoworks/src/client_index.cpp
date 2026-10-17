@@ -62,13 +62,22 @@ std::vector<std::string> Client::dependentsOf(const std::string& nodeId) const {
 }
 
 // Also makes the table's sorted indexes exist, so that putting the entry places the row in them.
+// Unsupported: the row was written at a version whose field ordinals the registered descriptor and
+// its queries do not share, so it stays out of the index until it is written at the registered version.
 Result<IndexedNode> Client::indexEntryFor(const Node& node) {
+  if (!sharesFieldsWithRegistered(node)) {
+    return Status::Unsupported;
+  }
   Result<StoredContent> stored = readStoredContent(node, nullptr);
   if (!stored.ok()) {
     return stored.status();
   }
   const TableDescriptor& table = *stored.value().table;
-  index_.defineIndexes(node.collection, table.modelName, table.indexes);
+  Result<const TableDescriptor*> registeredTable = tableDescriptorFor(node.collection, table.modelName);
+  if (!registeredTable.ok()) {
+    return registeredTable.status();
+  }
+  index_.defineIndexes(node.collection, table.modelName, registeredTable.value()->indexes);
   Json& content = stored.value().content;
   removeFileKeys(*table.model, content);
   removeReferenceKeys(*table.model, content);
@@ -93,7 +102,7 @@ void Client::indexNode(const std::string& nodeId) {
     return;
   }
   index_.erase(nodeId);
-  if (entry.status() == Status::IntegrityFailure) {
+  if (entry.status() == Status::IntegrityFailure || entry.status() == Status::Unsupported) {
     unindexedNodeIds_.erase(nodeId);
     return;
   }

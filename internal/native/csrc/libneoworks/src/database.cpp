@@ -1,5 +1,7 @@
 #include "database.hpp"
 
+#include <algorithm>
+
 namespace nw {
 
 namespace {
@@ -112,6 +114,8 @@ void LocalDatabase::load(std::string_view kind, std::string_view key, const Byte
     loadOutbox(key, plaintext);
   } else if (kind == "descriptor") {
     acceptedDescriptors_.insert(std::string(key));
+  } else if (kind == "published") {
+    loadPublishedDescriptor(key, plaintext);
   } else if (kind == "meta" && key == "cursor") {
     cursor_ = std::string(plaintext.begin(), plaintext.end());
   }
@@ -375,8 +379,8 @@ std::vector<std::string> LocalDatabase::linkersOf(const std::string& targetId) c
 
 namespace {
 
-std::string descriptorKey(const std::string& collection, const std::string& descriptorHash) {
-  return collection + " " + descriptorHash;
+std::string descriptorKey(const std::string& collection, const std::string& descriptorHashOrVersion) {
+  return collection + " " + descriptorHashOrVersion;
 }
 
 }  // namespace
@@ -389,6 +393,36 @@ Status LocalDatabase::acceptDescriptor(const std::string& collection, const std:
   std::string key = descriptorKey(collection, descriptorHash);
   acceptedDescriptors_.insert(key);
   return store_->put("descriptor", key, bytesOf("1"));
+}
+
+// The record is the hash, a line feed, then the descriptor text.
+void LocalDatabase::loadPublishedDescriptor(std::string_view key, const Bytes& plaintext) {
+  auto separator = std::find(plaintext.begin(), plaintext.end(), static_cast<uint8_t>('\n'));
+  if (separator == plaintext.end()) {
+    return;
+  }
+  PublishedDescriptor descriptor;
+  descriptor.descriptorHash.assign(plaintext.begin(), separator);
+  descriptor.text.assign(separator + 1, plaintext.end());
+  publishedDescriptors_[std::string(key)] = std::move(descriptor);
+}
+
+const LocalDatabase::PublishedDescriptor* LocalDatabase::findPublishedDescriptor(const std::string& collection,
+                                                                                const std::string& version) const {
+  auto found = publishedDescriptors_.find(descriptorKey(collection, version));
+  if (found == publishedDescriptors_.end()) {
+    return nullptr;
+  }
+  return &found->second;
+}
+
+Status LocalDatabase::putPublishedDescriptor(const std::string& collection, const std::string& version,
+                                             PublishedDescriptor descriptor) {
+  std::string key = descriptorKey(collection, version);
+  Bytes record = bytesOf(descriptor.descriptorHash + "\n");
+  record.insert(record.end(), descriptor.text.begin(), descriptor.text.end());
+  publishedDescriptors_[key] = std::move(descriptor);
+  return store_->put("published", key, record);
 }
 
 std::vector<std::string> LocalDatabase::nodesInCollection(const std::string& collection) const {
@@ -646,6 +680,7 @@ Status LocalDatabase::wipe() {
   chains_.clear();
   integrityFailures_.clear();
   acceptedDescriptors_.clear();
+  publishedDescriptors_.clear();
   cursor_.clear();
   Status cleared = store_->clear();
   for (const std::string& nodeId : removedNodeIds) {

@@ -48,9 +48,16 @@ type newRoot struct {
 
 // NodeUpdate changes some fields of a node; a nil value clears the field and
 // fields left out keep their value.
+//
+// SchemaVersion writes the row at that schema version, above the one it is at
+// and not above the one the client registered: a migrated write. Changes is
+// then the row's whole content in that version's shape, and fields it leaves
+// out are unset. A row at another version than the registered one can only be
+// changed this way.
 type NodeUpdate struct {
-	NodeID  string         `json:"nodeId"`
-	Changes map[string]any `json:"changes"`
+	NodeID        string         `json:"nodeId"`
+	Changes       map[string]any `json:"changes"`
+	SchemaVersion string         `json:"schemaVersion,omitempty"`
 }
 
 // NodeFile is one stored file of a node as the server sees it: the object and
@@ -63,23 +70,25 @@ type NodeFile struct {
 }
 
 // NodeSummary is a node as the local store lists it, without its content. Table
-// is nil for roots; Links are the IDs of the rows whose keys the row's
+// and SchemaVersion, the version that wrote the content, are nil for roots;
+// Links are the IDs of the rows whose keys the row's
 // references carry.
 type NodeSummary struct {
-	ID         string     `json:"id"`
-	ParentID   *string    `json:"parentId"`
-	OwnerID    string     `json:"ownerId"`
-	Collection string     `json:"collection"`
-	Kind       NodeKind   `json:"kind"`
-	Table      *string    `json:"table"`
-	Links      []string   `json:"links"`
-	Deleted    bool       `json:"deleted"`
-	Dirty      bool       `json:"dirty"`
-	Rejected   bool       `json:"rejected"`
-	Role       string     `json:"role"`
-	CreatedAt  string     `json:"createdAt"`
-	UpdatedAt  string     `json:"updatedAt"`
-	Files      []NodeFile `json:"files"`
+	ID            string     `json:"id"`
+	ParentID      *string    `json:"parentId"`
+	OwnerID       string     `json:"ownerId"`
+	Collection    string     `json:"collection"`
+	Kind          NodeKind   `json:"kind"`
+	Table         *string    `json:"table"`
+	SchemaVersion *string    `json:"schemaVersion"`
+	Links         []string   `json:"links"`
+	Deleted       bool       `json:"deleted"`
+	Dirty         bool       `json:"dirty"`
+	Rejected      bool       `json:"rejected"`
+	Role          string     `json:"role"`
+	CreatedAt     string     `json:"createdAt"`
+	UpdatedAt     string     `json:"updatedAt"`
+	Files         []NodeFile `json:"files"`
 }
 
 // ContentError says why content did not fit the collection's schema.
@@ -239,6 +248,62 @@ func (client *Client) ReadNode(nodeID string) (json.RawMessage, error) {
 		return nil, err
 	}
 	return takeBuffer(&buffer), nil
+}
+
+// RowRead is a row's content with the schema version that wrote it, nil for a
+// row written before rows recorded one. The content is in the shape of that
+// version, which may be below the registered one.
+type RowRead struct {
+	SchemaVersion *string         `json:"schemaVersion"`
+	Content       json.RawMessage `json:"content"`
+}
+
+// ReadRow is ReadNode with the schema version that wrote the row.
+// StatusUnsupported: the row was written above the registered version.
+// StatusInvalidState: the descriptor of the row's version is not loaded yet; a
+// sync loads it from the registry.
+func (client *Client) ReadRow(nodeID string) (RowRead, error) {
+	idText := cString(nodeID)
+	defer freeString(idText)
+	var buffer C.nw_buffer
+	client.mutex.Lock()
+	defer client.mutex.Unlock()
+	if err := client.contentCall(C.nw_client_read_row(client.native, idText, &buffer)); err != nil {
+		return RowRead{}, err
+	}
+	var row RowRead
+	if err := json.Unmarshal(takeBuffer(&buffer), &row); err != nil {
+		return RowRead{}, fmt.Errorf("row: %w", err)
+	}
+	return row, nil
+}
+
+// RowReference names a row and the schema version that wrote it.
+type RowReference struct {
+	ID            string `json:"id"`
+	SchemaVersion string `json:"schemaVersion"`
+}
+
+// RowsBelow lists the live rows of table in collection that were written at a
+// schema version below version, by ID. Rows that record no version are not
+// listed.
+func (client *Client) RowsBelow(collection, table, version string) ([]RowReference, error) {
+	collectionText, tableText, versionText := cString(collection), cString(table), cString(version)
+	defer freeString(collectionText)
+	defer freeString(tableText)
+	defer freeString(versionText)
+	var buffer C.nw_buffer
+	client.mutex.Lock()
+	err := check(C.nw_client_rows_below(client.native, collectionText, tableText, versionText, &buffer))
+	client.mutex.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	var rows []RowReference
+	if err := json.Unmarshal(takeBuffer(&buffer), &rows); err != nil {
+		return nil, fmt.Errorf("rows below: %w", err)
+	}
+	return rows, nil
 }
 
 // ListNodes lists the nodes under parentID in collection; an empty argument

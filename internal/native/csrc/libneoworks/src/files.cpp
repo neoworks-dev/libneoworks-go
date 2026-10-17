@@ -146,10 +146,11 @@ Result<SymmetricKey> findFileKey(const ModelDescriptor& model, const Json& conte
 
 bool holdsFile(const ModelDescriptor& model, const Json& content) { return !fileValuesOf(model, content).empty(); }
 
-Status assignFileKeys(const ModelDescriptor& model, Json& written, const Json& stored, CodecError& error) {
-  std::map<std::string, std::string> storedKeyTexts = keyTextsByObjectId(model, stored);
+Status assignFileKeys(const ModelDescriptor& writtenModel, const ModelDescriptor& storedModel, Json& written,
+                      const Json& stored, CodecError& error) {
+  std::map<std::string, std::string> storedKeyTexts = keyTextsByObjectId(storedModel, stored);
   Status status = Status::Ok;
-  walkContentLeaves(model, written, [&](const ValueShape& shape, Json& value, uint32_t) {
+  walkContentLeaves(writtenModel, written, [&](const ValueShape& shape, Json& value, uint32_t) {
     if (shape.kind == ValueKind::File && value.is_object() && status == Status::Ok) {
       status = assignFileKey(value, storedKeyTexts, error);
     }

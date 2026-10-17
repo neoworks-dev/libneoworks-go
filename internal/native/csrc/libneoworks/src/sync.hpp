@@ -52,7 +52,7 @@ class SyncSession {
 
  private:
   enum class Phase { PushNodes, PushOutbox, Pull, ResolveConflicts, Done };
-  enum class Awaiting { Nothing, PushResult, OutboxResult, PullPage, Identity, IdentityHistory, Certificate, RenewalCertificate, AccessLog };
+  enum class Awaiting { Nothing, PushResult, OutboxResult, PullPage, Identity, IdentityHistory, Certificate, RenewalCertificate, AccessLog, SchemaRecord, DescriptorText };
 
   struct InFlightPush {
     std::string id;
@@ -67,6 +67,10 @@ class SyncSession {
   std::optional<HttpRequest> outboxRequestFor(const Json& operation);
   std::optional<HttpRequest> buildLogFetchRequest();
   Status handleAccessLogResponse(const HttpResponse& response);
+  std::optional<HttpRequest> buildDescriptorRequest();
+  std::optional<HttpRequest> descriptorRequestFor(const DescriptorNeed& need);
+  Status handleSchemaRecordResponse(const HttpResponse& response);
+  Status handleDescriptorTextResponse(const HttpResponse& response);
   void noteChainOutcome(const std::string& nodeId, Status outcome, bool mayFetch);
   void applyAccessLog(const std::vector<AccessLogEntry>& entries);
   void retryDeferredGrants();
@@ -118,6 +122,12 @@ class SyncSession {
   std::string fetchingLogFor_;
   std::set<std::string> fetchedLogs_;
   std::vector<AccessGrant> deferredGrants_;
+  // Descriptors of earlier schema versions, fetched once the pull is done: the need in flight, the
+  // hashes the registry publishes per collection and version, and what failed this session.
+  std::optional<DescriptorNeed> fetchingDescriptor_;
+  std::map<std::string, std::map<std::string, std::string>> publishedHashes_;
+  std::set<std::string> failedSchemaRecords_;
+  std::set<std::string> failedDescriptors_;
 
   std::optional<PullPage> page_;
   // Which of the page's nodes already passed their signature check, by position.

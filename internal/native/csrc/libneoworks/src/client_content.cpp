@@ -10,21 +10,6 @@ namespace nw {
 
 namespace {
 
-std::string registryDescriptorPath(const std::string& collection, const std::string& descriptorHash) {
-  size_t slash = collection.find('/');
-  std::string scope = collection.substr(1, slash - 1);
-  std::string name = collection.substr(slash + 1);
-  return "/api/v1/schemas/" + scope + "/" + name + "/descriptors/" + descriptorHash;
-}
-
-CodecError contentError(Status status, std::string path, std::string reason) {
-  CodecError error;
-  error.status = status;
-  error.path = std::move(path);
-  error.reason = std::move(reason);
-  return error;
-}
-
 // The fields an app may see: Files without their keys and references as the ids of their rows.
 void toAppContent(const TableDescriptor& table, Json& content) {
   removeFileKeys(*table.model, content);
@@ -46,6 +31,14 @@ bool keepsBelongsTo(const TableDescriptor& table, const Json& changes, const Nod
 
 }  // namespace
 
+CodecError contentError(Status status, std::string path, std::string reason) {
+  CodecError error;
+  error.status = status;
+  error.path = std::move(path);
+  error.reason = std::move(reason);
+  return error;
+}
+
 // ── Descriptors ───────────────────────────────────────────────────────────────
 
 Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::string& collection,
@@ -66,10 +59,7 @@ Result<std::optional<DescriptorCheck>> Client::registerDescriptor(const std::str
   registered.confirmed = database_->isDescriptorAccepted(collection, registered.descriptorHash);
   std::optional<DescriptorCheck> check;
   if (!registered.confirmed) {
-    HttpRequest request;
-    request.method = "GET";
-    request.url = registryDescriptorPath(collection, registered.descriptorHash);
-    check = DescriptorCheck{registered.descriptorHash, std::move(request)};
+    check = DescriptorCheck{registered.descriptorHash, descriptorRequest(collection, registered.descriptorHash)};
   }
   descriptors_[collection] = std::move(registered);
   resetIndexOf(collection);
@@ -95,14 +85,6 @@ Status Client::completeDescriptorCheck(const std::string& collection, const Http
   return accepted;
 }
 
-void Client::stampSchemaVersion(Node& node) const {
-  auto found = descriptors_.find(node.collection);
-  if (isRoot(node) || found == descriptors_.end()) {
-    return;
-  }
-  node.schemaVersion = found->second.schemaVersion;
-}
-
 const SchemaDescriptor* Client::descriptorFor(const std::string& collection) const {
   auto found = descriptors_.find(collection);
   if (found == descriptors_.end() || !found->second.confirmed) {
@@ -117,34 +99,31 @@ Result<const TableDescriptor*> Client::tableDescriptorFor(const std::string& col
     lastContentError_ = contentError(Status::InvalidState, collection, "no confirmed descriptor for the collection");
     return Status::InvalidState;
   }
-  const TableDescriptor* found = schema->tableByName(table);
-  if (found == nullptr) {
-    lastContentError_ = contentError(Status::InvalidArgument, collection, "the schema has no table " + table);
-    return Status::InvalidArgument;
-  }
-  return found;
+  return tableIn(*schema, collection, table);
 }
 
 // ── Writes ────────────────────────────────────────────────────────────────────
 
-Result<Json> Client::withFileKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored) {
+Result<Json> Client::withFileKeys(const TableDescriptor& table, const TableDescriptor& storedTable,
+                                  const Json& changes, const FacetMap& stored) {
   if (!holdsFile(*table.model, changes)) {
     return changes;
   }
-  Result<Json> storedContent = decodeContent(table, stored, lastContentError_);
+  Result<Json> storedContent = decodeContent(storedTable, stored, lastContentError_);
   if (!storedContent.ok()) {
     return storedContent.status();
   }
   Json keyed = changes;
-  Status assigned = assignFileKeys(*table.model, keyed, storedContent.value(), lastContentError_);
+  Status assigned = assignFileKeys(*table.model, *storedTable.model, keyed, storedContent.value(), lastContentError_);
   if (assigned != Status::Ok) {
     return assigned;
   }
   return keyed;
 }
 
-Result<Json> Client::withKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored) {
-  Result<Json> keyed = withFileKeys(table, changes, stored);
+Result<Json> Client::withKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
+                              const FacetMap& stored) {
+  Result<Json> keyed = withFileKeys(table, storedTable, changes, stored);
   if (!keyed.ok()) {
     return keyed;
   }
@@ -286,7 +265,7 @@ Result<std::string> Client::createRow(const CreateNodeRequest& request) {
   if (attached != Status::Ok) {
     return attached;
   }
-  Result<Json> keyed = withKeys(*table.value(), request.content, FacetMap());
+  Result<Json> keyed = withKeys(*table.value(), *table.value(), request.content, FacetMap());
   if (!keyed.ok()) {
     return keyed.status();
   }
@@ -298,7 +277,7 @@ Result<std::string> Client::createRow(const CreateNodeRequest& request) {
   if (described != Status::Ok) {
     return described;
   }
-  stampSchemaVersion(node);
+  stampSchemaVersion(node, registeredVersion(request.collection));
   sealContent(node, nodeKey, plaintexts.value());
   Status stored = signAndStore(node);
   if (stored != Status::Ok) {
@@ -329,30 +308,26 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (!previous.ok()) {
     return previous.status();
   }
-  Result<const TableDescriptor*> table = tableDescriptorFor(local->node.collection, *local->node.table);
-  if (!table.ok()) {
-    return table.status();
+  Result<UpdatePlan> plan = planUpdate(local->node, request);
+  if (!plan.ok()) {
+    return plan.status();
   }
-  if (!keepsBelongsTo(*table.value(), request.changes, local->node)) {
-    lastContentError_ = contentError(Status::InvalidArgument, table.value()->modelName, "what a row belongs to does not change");
+  if (!keepsBelongsTo(*plan.value().writeTable, request.changes, local->node)) {
+    lastContentError_ = contentError(Status::InvalidArgument, plan.value().writeTable->modelName, "what a row belongs to does not change");
     return Status::InvalidArgument;
   }
-  Result<Json> keyed = withKeys(*table.value(), request.changes, previous.value());
-  if (!keyed.ok()) {
-    return keyed.status();
-  }
-  Result<FacetMap> plaintexts = encodeContent(*table.value(), keyed.value(), previous.value(), true, lastContentError_);
+  Result<FacetMap> plaintexts = updatedPlaintexts(plan.value(), request, previous.value());
   if (!plaintexts.ok()) {
     return plaintexts.status();
   }
   Node node = local->node;
   node.baseSeq = node.seq;
   node.updatedAt = nowText();
-  Status described = describeContent(*table.value(), plaintexts.value(), node);
+  Status described = describeContent(*plan.value().writeTable, plaintexts.value(), node);
   if (described != Status::Ok) {
     return described;
   }
-  stampSchemaVersion(node);
+  stampSchemaVersion(node, plan.value().writeVersion);
   sealContent(node, nodeKey.value(), plaintexts.value());
   return signAndStore(node);
 }
@@ -472,7 +447,7 @@ Result<Client::StoredContent> Client::readStoredContent(const Node& node, const 
     }
     return keyring_.resolveFacetKey(node, tag, lookup);
   };
-  Result<const TableDescriptor*> table = tableDescriptorFor(node.collection, *node.table);
+  Result<const TableDescriptor*> table = tableOfRow(node);
   if (!table.ok()) {
     return table.status();
   }
@@ -546,11 +521,11 @@ Result<SymmetricKey> Client::keyThroughLinks(const Node& target) {
 }
 
 Result<Json> Client::readNode(const std::string& nodeId) {
-  const Node* node = database_->findNode(nodeId);
-  if (node == nullptr || node->deleted) {
-    return Status::NotFound;
+  Result<RowRead> row = readRow(nodeId);
+  if (!row.ok()) {
+    return row.status();
   }
-  return readContent(*node, nullptr);
+  return row.take().content;
 }
 
 std::optional<std::string> Client::tableOf(const std::string& nodeId) const {

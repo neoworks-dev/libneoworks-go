@@ -125,6 +125,15 @@ class LocalDatabase {
   bool isDescriptorAccepted(const std::string& collection, const std::string& descriptorHash) const;
   Status acceptDescriptor(const std::string& collection, const std::string& descriptorHash);
 
+  // The descriptor of one published version of a collection's schema, fetched from the registry
+  // and checked against the hash it publishes for that version.
+  struct PublishedDescriptor {
+    std::string descriptorHash;
+    Bytes text;
+  };
+  const PublishedDescriptor* findPublishedDescriptor(const std::string& collection, const std::string& version) const;
+  Status putPublishedDescriptor(const std::string& collection, const std::string& version, PublishedDescriptor descriptor);
+
   Status saveShadow(const Node& losingVersion);
   std::vector<Node> shadowsOf(const std::string& nodeId) const;
 
@@ -149,6 +158,7 @@ class LocalDatabase {
   void loadLink(const Bytes& plaintext);
   void loadChain(const Bytes& plaintext);
   void loadIntegrity(std::string_view key, const Bytes& plaintext);
+  void loadPublishedDescriptor(std::string_view key, const Bytes& plaintext);
 
   std::unique_ptr<EncryptedRecordStore> store_;
   std::map<std::string, LocalNode> nodes_;
@@ -170,6 +180,8 @@ class LocalDatabase {
   std::map<std::string, std::string> integrityFailures_;
   // "<collection> <descriptorHash>"
   std::set<std::string> acceptedDescriptors_;
+  // By "<collection> <version>"
+  std::map<std::string, PublishedDescriptor> publishedDescriptors_;
   std::string cursor_;
   size_t corruptRecords_ = 0;
   ChangeObserver nodeObserver_;

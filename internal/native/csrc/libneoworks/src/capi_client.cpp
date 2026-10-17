@@ -121,6 +121,10 @@ Json nodeSummary(Client& client, const LocalNode& local) {
   if (table.has_value()) {
     json["table"] = *table;
   }
+  json["schemaVersion"] = Json(nullptr);
+  if (node.schemaVersion.has_value()) {
+    json["schemaVersion"] = *node.schemaVersion;
+  }
   json["files"] = filesToJson(node.files);
   json["links"] = Json(node.links);
   return json;
@@ -444,6 +448,7 @@ int nw_client_update_node(nw_client* client, const char* request_json) {
     if (json->contains("changes")) {
       request.changes = json->at("changes");
     }
+    request.schemaVersion = readString(*json, "schemaVersion");
     return code(client->value->updateNode(request));
   });
 }
@@ -471,6 +476,46 @@ int nw_client_read_node(nw_client* client, const char* node_id, nw_buffer* json)
       return code(content.status());
     }
     return fillJson(json, content.value());
+  });
+}
+
+int nw_client_read_row(nw_client* client, const char* node_id, nw_buffer* json) {
+  if (!hasArguments(client, node_id) || json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    Result<RowRead> row = client->value->readRow(node_id);
+    if (!row.ok()) {
+      return code(row.status());
+    }
+    Json result = Json::object();
+    result["schemaVersion"] = Json(nullptr);
+    if (row.value().schemaVersion.has_value()) {
+      result["schemaVersion"] = *row.value().schemaVersion;
+    }
+    result["content"] = row.value().content;
+    return fillJson(json, result);
+  });
+}
+
+int nw_client_rows_below(nw_client* client, const char* collection, const char* table, const char* version,
+                         nw_buffer* json) {
+  if (!hasArguments(client, collection) || table == nullptr || version == nullptr || json == nullptr) {
+    return NW_ERR_INVALID_ARGUMENT;
+  }
+  return guarded([&] {
+    Result<std::vector<RowReference>> rows = client->value->rowsBelow(collection, table, version);
+    if (!rows.ok()) {
+      return code(rows.status());
+    }
+    Json list = Json::array();
+    for (const RowReference& row : rows.value()) {
+      Json entry = Json::object();
+      entry["id"] = row.id;
+      entry["schemaVersion"] = row.schemaVersion;
+      list.push_back(entry);
+    }
+    return fillJson(json, list);
   });
 }
 

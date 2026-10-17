@@ -147,6 +147,32 @@ func TestNodeOperationsNeedAGrant(t *testing.T) {
 	}
 }
 
+func TestRowsAreReadAndListedByTheirSchemaVersion(t *testing.T) {
+	client := newTestClient(t)
+	collection := "@neoworks/calendar"
+	descriptor := readDescriptor(t)
+	if _, err := client.RegisterDescriptor(collection, descriptor, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CompleteDescriptorCheck(collection, 200, descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ReadRow("00000000-0000-0000-0000-000000000000"); !errors.Is(err, StatusNotFound) {
+		t.Fatalf("reading an unknown row: got %v, want %v", err, StatusNotFound)
+	}
+	rows, err := client.RowsBelow(collection, "Event", "2.0.0")
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("a fresh store has no rows below 2.0.0: %v %v", rows, err)
+	}
+	if _, err := client.RowsBelow(collection, "Event", "two"); !errors.Is(err, StatusInvalidArgument) {
+		t.Fatalf("a malformed version: got %v, want %v", err, StatusInvalidArgument)
+	}
+	update := NodeUpdate{NodeID: "00000000-0000-0000-0000-000000000000", Changes: map[string]any{"title": "x"}, SchemaVersion: "1.0.0"}
+	if err := client.UpdateNode(update); !errors.Is(err, StatusNotFound) {
+		t.Fatalf("updating an unknown row: got %v, want %v", err, StatusNotFound)
+	}
+}
+
 func TestDeletingAnUnknownNodeListsNothing(t *testing.T) {
 	client := newTestClient(t)
 	deletedIDs, err := client.DeleteNode("00000000-0000-0000-0000-000000000000")

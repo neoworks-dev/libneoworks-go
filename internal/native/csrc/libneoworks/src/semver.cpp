@@ -41,6 +41,16 @@ std::string semverText(const Semver& version) {
   return std::to_string(version.major) + "." + std::to_string(version.minor) + "." + std::to_string(version.patch);
 }
 
+Semver compatibilityLine(const Semver& version) {
+  if (version.major > 0) {
+    return Semver{version.major, 0, 0};
+  }
+  if (version.minor > 0) {
+    return Semver{0, version.minor, 0};
+  }
+  return Semver{0, 0, version.patch};
+}
+
 Bytes semverBody(const Semver& version) {
   wire::Writer writer;
   writer.varint(version.major);

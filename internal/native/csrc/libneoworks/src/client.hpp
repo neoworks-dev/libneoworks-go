@@ -40,6 +40,29 @@ struct UpdateNodeRequest {
   // The top-level fields to change. A given field replaces the stored value, null clears it,
   // and fields not given keep their value.
   Json changes = Json::object();
+  // The schema version to write the row at, when it is above the one the row is at: a migrated
+  // write. Then `changes` is the whole content of the row in that version's shape, encoded with
+  // that version's descriptor; fields it leaves out are unset. Without it a row can only be changed
+  // at the version this client registered.
+  std::optional<std::string> schemaVersion;
+};
+
+// A row's content with the schema version that wrote it, nullopt for a row written before rows
+// recorded one and for roots.
+struct RowRead {
+  std::optional<std::string> schemaVersion;
+  Json content;
+};
+
+struct RowReference {
+  std::string id;
+  std::string schemaVersion;
+};
+
+// A schema version of a collection whose descriptor this client does not hold yet.
+struct DescriptorNeed {
+  std::string collection;
+  std::string version;
 };
 
 enum class PinState { New, Match, Changed };
@@ -84,6 +107,13 @@ struct DescriptorCheck {
   HttpRequest request;
 };
 
+CodecError contentError(Status status, std::string path, std::string reason);
+
+// The registry request for a collection's schema and the hashes of its published versions' descriptors.
+HttpRequest schemaRecordRequest(const std::string& collection);
+// The registry request for the descriptor of `collection` with the hash `descriptorHash`.
+HttpRequest descriptorRequest(const std::string& collection, const std::string& descriptorHash);
+
 // A holder of keys: either the account vault (user principal) or an app
 // installation (install principal with a delegation certificate).
 class Client {
@@ -125,6 +155,15 @@ class Client {
   Status completeDescriptorCheck(const std::string& collection, const HttpResponse& response);
   // The descriptor of `collection` once confirmed, nullptr before.
   const SchemaDescriptor* descriptorFor(const std::string& collection) const;
+  // The versions below the registered one that rows of the registered collections were written
+  // at, whose descriptors are not held yet. A row is read with the descriptor of the version that
+  // wrote it; fetch each from the registry (schemaRecordRequest, descriptorRequest) and hand it to
+  // acceptPublishedDescriptor. A sync session does this.
+  std::vector<DescriptorNeed> missingDescriptors();
+  // Keeps the descriptor of a published version once `text` is exactly the descriptor with the
+  // hash the registry publishes for it, and reads the rows written at that version.
+  // AuthenticationFailed: the hash differs. Malformed: not a valid descriptor.
+  Status acceptPublishedDescriptor(const DescriptorNeed& need, const std::string& descriptorHash, const Bytes& text);
   // Why the last create, update, read of content or query was rejected.
   const CodecError& lastContentError() const { return lastContentError_; }
 
@@ -141,6 +180,14 @@ class Client {
   // The fields of the facets this client can open; a reference reads as the id of its row. Roots
   // read as {}. NotFound: no such node or no facet can be opened.
   Result<Json> readNode(const std::string& nodeId);
+  // As readNode, with the schema version that wrote the row. The content is in the shape of that
+  // version. Unsupported: the row was written at a version above the registered one.
+  // InvalidState: the descriptor of the row's version is not held yet, see missingDescriptors.
+  Result<RowRead> readRow(const std::string& nodeId);
+  // The live rows of `table` in `collection` written at a version below `version`, by id. Rows
+  // without a recorded version are not listed.
+  Result<std::vector<RowReference>> rowsBelow(const std::string& collection, const std::string& table,
+                                              const std::string& version) const;
   // The table of a row, by model name; nullopt for roots and rows this holder does not have.
   std::optional<std::string> tableOf(const std::string& nodeId) const;
   // Decrypts a version (the JSON object of GET /nodes/{id}/versions) of a node this client
@@ -259,6 +306,32 @@ class Client {
   Result<IndexedNode> indexEntryFor(const Node& node);
   Status acceptPulledRevocation(const AccessGrant& grant);
 
+  // The schema a row is read with: the registered one for a row written at its version, the
+  // fetched one for a row written below it. Unsupported for a row written above it.
+  Result<const SchemaDescriptor*> schemaOfRow(const Node& node);
+  Result<const SchemaDescriptor*> schemaAtVersion(const std::string& collection, const std::string& version);
+  Result<const SchemaDescriptor*> publishedSchema(const std::string& collection, const std::string& version);
+  Result<const TableDescriptor*> tableIn(const SchemaDescriptor& schema, const std::string& collection,
+                                         const std::string& table);
+  // The table of a row in the schema of the version that wrote it.
+  Result<const TableDescriptor*> tableOfRow(const Node& node);
+  // Whether the row's field ordinals mean what the registered descriptor says: it was written at
+  // that version or below it on the same compatibility line.
+  bool sharesFieldsWithRegistered(const Node& node) const;
+  std::set<std::string> versionsBelowRegistered(const std::string& collection) const;
+  // How a change to a row is written: the stored content is read with `storedTable`, the version
+  // that wrote the row, and the new content is encoded with `writeTable` of `writeVersion`.
+  struct UpdatePlan {
+    const TableDescriptor* storedTable = nullptr;
+    const TableDescriptor* writeTable = nullptr;
+    std::string writeVersion;
+    // The row moves to a later version, so the request holds its whole content.
+    bool migrates = false;
+  };
+  Result<UpdatePlan> planUpdate(const Node& node, const UpdateNodeRequest& request);
+  Result<UpdatePlan> planMigration(const Node& node, const TableDescriptor& storedTable, const std::string& target);
+  Result<FacetMap> updatedPlaintexts(const UpdatePlan& plan, const UpdateNodeRequest& request, const FacetMap& previous);
+
   // A row's content as stored, Files and references with their keys, and the table it names.
   struct StoredContent {
     const TableDescriptor* table = nullptr;
@@ -270,11 +343,13 @@ class Client {
   Result<StoredContent> readStoredContent(const Node& node, const SymmetricKey* nodeKey);
   // The content as an app sees it: Files without their keys and references as ids.
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
-  // `changes` with a key in every File value: the stored one when `stored` holds the File, else a
-  // new one.
-  Result<Json> withFileKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored);
+  // `changes`, in the shape of `table`, with a key in every File value: the stored one when
+  // `stored`, read with `storedTable`, holds the File, else a new one.
+  Result<Json> withFileKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
+                            const FacetMap& stored);
   // `changes` with the keys of the files and of the referenced rows in it.
-  Result<Json> withKeys(const TableDescriptor& table, const Json& changes, const FacetMap& stored);
+  Result<Json> withKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
+                        const FacetMap& stored);
   // The key of `rowId` for a reference to it from a new write: a live row this holder can read, of
   // the table `table` names.
   Result<SymmetricKey> referencedRowKey(const std::string& rowId, const std::string& table);
@@ -309,8 +384,9 @@ class Client {
   bool canManageAccess(const Node& node) const;
   Result<std::string> grantCertificateFor(const std::string& principalType, const std::string& principalId) const;
   std::string nextOutboxId();
-  // Records the registered schema version on a node whose content this client just encoded.
-  void stampSchemaVersion(Node& node) const;
+  // Records `version` on a node whose content this client just encoded.
+  static void stampSchemaVersion(Node& node, const std::string& version);
+  const std::string& registeredVersion(const std::string& collection) const;
   Result<Bytes> encPubFor(const std::string& principalType, const std::string& principalId) const;
   // Writes and queues the grant described by `request`; the caller checked the right to share.
   Result<AccessGrant> grantNode(const ShareRequest& request);
@@ -340,6 +416,8 @@ class Client {
   Clock clock_;
   int64_t lastOutboxStamp_ = 0;
   std::map<std::string, RegisteredDescriptor> descriptors_;
+  // The descriptors of earlier published versions, by "<collection> <version>".
+  std::map<std::string, std::shared_ptr<const SchemaDescriptor>> publishedSchemas_;
   CodecError lastContentError_;
   FieldIndex index_;
   // Nodes not in the index because they cannot be read yet.
