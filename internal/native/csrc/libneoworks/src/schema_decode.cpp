@@ -5,6 +5,7 @@
 #include "schema_codec.hpp"
 #include "schema_codec_internal.hpp"
 #include "schema_values.hpp"
+#include "semver.hpp"
 
 namespace nw {
 
@@ -150,6 +151,17 @@ Outcome readJsonValue(const wire::Field& field, Context& context, Json& out) {
   return produced(out, std::move(*value));
 }
 
+Outcome readSemver(const wire::Field& field, Context& context, Json& out) {
+  if (!expectWire(field, WireType::Len, context)) {
+    return Outcome::Failed;
+  }
+  std::optional<Semver> version = semverFromBody(field.body);
+  if (!version.has_value()) {
+    return failed(context.fail(kMalformed, "a semver must be three varints of at most 32 bits"));
+  }
+  return produced(out, Json(semverText(*version)));
+}
+
 std::optional<std::string> formatTemporal(Scalar scalar, int64_t number) {
   if (scalar == Scalar::Date) {
     return daysToDate(number);
@@ -196,6 +208,8 @@ Outcome readScalar(Scalar scalar, const ValueConstraints& constraints, const wir
       return readUuid(field, context, out);
     case Scalar::JsonValue:
       return readJsonValue(field, context, out);
+    case Scalar::Semver:
+      return readSemver(field, context, out);
     default:
       return readTemporal(scalar, field, context, out);
   }

@@ -34,6 +34,7 @@ enum class Scalar {
   Time,
   Timestamp,
   Duration,
+  Semver,
 };
 
 // File is the built-in file type: it is encoded and decoded as the message `fileModel()`.
