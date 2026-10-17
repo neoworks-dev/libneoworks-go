@@ -46,6 +46,7 @@ struct LinkEntry {
   std::string nodeId;
   std::string linkId;
   std::string createdAt;
+  std::optional<std::string> expiresAt;
 };
 
 struct StoredCertificate {

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "timeutil.hpp"
 #include "tlv.hpp"
 
 namespace nw {
@@ -9,7 +10,7 @@ namespace nw {
 Bytes zeroPrevHash() { return Bytes(kEntryHashBytes, 0); }
 
 Bytes entryBytes(const AccessLogEntry& entry) {
-  return TlvWriter("nw-access-entry-v2")
+  return TlvWriter("nw-access-entry-v3")
       .text(entry.nodeId)
       .u64(entry.index)
       .bytes(entry.prevHash)
@@ -22,6 +23,8 @@ Bytes entryBytes(const AccessLogEntry& entry) {
       .text(entry.actorType)
       .text(entry.actorId)
       .optionalText(entry.certId)
+      .optionalText(entry.expiresAt)
+      .optionalText(entry.via)
       .finish();
 }
 
@@ -59,6 +62,14 @@ Json entryToJson(const AccessLogEntry& entry) {
   json["certId"] = Json(nullptr);
   if (entry.certId.has_value()) {
     json["certId"] = *entry.certId;
+  }
+  json["expiresAt"] = Json(nullptr);
+  if (entry.expiresAt.has_value()) {
+    json["expiresAt"] = *entry.expiresAt;
+  }
+  json["via"] = Json(nullptr);
+  if (entry.via.has_value()) {
+    json["via"] = *entry.via;
   }
   json["signature"] = bytesToJson(entry.signature);
   return json;
@@ -110,6 +121,22 @@ EntryScalars readEntryScalars(const Json& json) {
   return scalars;
 }
 
+// A revoke carries no expiry; a grant's is a whole-second UTC instant.
+bool hasValidExpiry(const std::string& action, const std::optional<std::string>& expiresAt) {
+  if (!expiresAt.has_value()) {
+    return true;
+  }
+  return action == "grant" && parseCanonicalExpiry(*expiresAt).has_value();
+}
+
+// A revoke carries no source; a grant's is the id of another grant.
+bool hasValidVia(const std::string& action, const std::optional<std::string>& via) {
+  if (!via.has_value()) {
+    return true;
+  }
+  return action == "grant" && isValidGrantId(*via);
+}
+
 bool hasValidEntryShape(const EntryScalars& scalars) {
   bool actionValid = *scalars.action == "grant" || *scalars.action == "revoke";
   return actionValid && isLowercaseUuid(*scalars.nodeId) && isValidPrincipalType(*scalars.principalType) &&
@@ -126,7 +153,10 @@ Result<AccessLogEntry> entryFromJson(const Json& json) {
   Result<std::optional<std::vector<uint32_t>>> facets = readFacets(json);
   bool wellFormed = true;
   std::optional<std::string> certId = readOptionalString(json, "certId", wellFormed);
-  if (!facets.ok() || !wellFormed) {
+  std::optional<std::string> expiresAt = readOptionalString(json, "expiresAt", wellFormed);
+  std::optional<std::string> via = readOptionalString(json, "via", wellFormed);
+  bool validOptionals = hasValidExpiry(*scalars.action, expiresAt) && hasValidVia(*scalars.action, via);
+  if (!facets.ok() || !wellFormed || !validOptionals) {
     return Status::Malformed;
   }
   AccessLogEntry entry;
@@ -142,6 +172,8 @@ Result<AccessLogEntry> entryFromJson(const Json& json) {
   entry.actorType = *scalars.actorType;
   entry.actorId = *scalars.actorId;
   entry.certId = certId;
+  entry.expiresAt = expiresAt;
+  entry.via = via;
   entry.signature = std::move(*scalars.signature);
   return entry;
 }
@@ -172,6 +204,8 @@ AccessLogEntry nextGrantEntry(const AccessGrant& grant, const std::optional<LogH
   entry.actorType = grant.grantedByType;
   entry.actorId = grant.grantedById;
   entry.certId = grant.certId;
+  entry.expiresAt = grant.expiresAt;
+  entry.via = grant.via;
   chainOnto(entry, head);
   return entry;
 }
@@ -200,7 +234,8 @@ bool entryMatchesGrant(const AccessLogEntry& entry, const AccessGrant& grant) {
          entry.principalType == grant.principalType && entry.principalId == grant.principalId &&
          entry.role == grant.role && entry.facets == grant.facets &&
          entry.wrappedKeysHash == hash(grant.wrappedKeys) && entry.actorType == grant.grantedByType &&
-         entry.actorId == grant.grantedById && entry.certId == grant.certId && entry.signature == grant.signature;
+         entry.actorId == grant.grantedById && entry.certId == grant.certId && entry.expiresAt == grant.expiresAt &&
+         entry.via == grant.via && entry.signature == grant.signature;
 }
 
 bool entryMatchesRevocation(const AccessLogEntry& entry, const AccessGrant& grant) {

@@ -249,6 +249,12 @@ Result<ShareRequest> parseShareRequest(nw_client* client, const Json& json) {
   request.principalType = readString(json, "principalType").value_or("");
   request.principalId = readString(json, "principalId").value_or("");
   request.role = readString(json, "role").value_or("");
+  bool expiryWellFormed = true;
+  request.expiresAt = readOptionalString(json, "expiresAt", expiryWellFormed);
+  request.via = readOptionalString(json, "via", expiryWellFormed);
+  if (!expiryWellFormed) {
+    return Status::Malformed;
+  }
   if (json.contains("facets") && json.at("facets").is_array()) {
     std::vector<uint32_t> facets;
     for (const Json& facet : json.at("facets")) {
@@ -785,13 +791,33 @@ int nw_client_list_grants(nw_client* client, const char* node_id, nw_buffer* jso
   });
 }
 
-int nw_client_create_link_key(nw_client* client, const char* node_id, nw_buffer* fragment_key,
-                              nw_buffer* link_request_json) {
+namespace {
+
+std::optional<std::string> optionalCString(const char* text) {
+  if (text == nullptr) {
+    return std::nullopt;
+  }
+  return std::string(text);
+}
+
+Json linkRequestJson(const char* nodeId, const std::optional<std::string>& expiresAt) {
+  Json request = Json::object({{"nodeId", std::string(nodeId)}});
+  if (expiresAt.has_value()) {
+    request["expiresAt"] = *expiresAt;
+  }
+  return request;
+}
+
+}  // namespace
+
+int nw_client_create_link_key(nw_client* client, const char* node_id, const char* expires_at,
+                              nw_buffer* fragment_key, nw_buffer* link_request_json) {
   if (!hasArguments(client, node_id) || fragment_key == nullptr || link_request_json == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
   return guarded([&] {
-    Result<std::string> fragment = client->value->createLinkFragment(node_id);
+    std::optional<std::string> expiresAt = optionalCString(expires_at);
+    Result<std::string> fragment = client->value->createLinkFragment(node_id, expiresAt);
     if (!fragment.ok()) {
       return code(fragment.status());
     }
@@ -799,15 +825,15 @@ int nw_client_create_link_key(nw_client* client, const char* node_id, nw_buffer*
     if (status != NW_OK) {
       return status;
     }
-    return fillJson(link_request_json, Json::object({{"nodeId", std::string(node_id)}}));
+    return fillJson(link_request_json, linkRequestJson(node_id, expiresAt));
   });
 }
 
-int nw_client_record_link(nw_client* client, const char* node_id, const char* link_id) {
+int nw_client_record_link(nw_client* client, const char* node_id, const char* link_id, const char* expires_at) {
   if (!hasArguments(client, node_id) || link_id == nullptr) {
     return NW_ERR_INVALID_ARGUMENT;
   }
-  return guarded([&] { return code(client->value->recordLink(node_id, link_id)); });
+  return guarded([&] { return code(client->value->recordLink(node_id, link_id, optionalCString(expires_at))); });
 }
 
 int nw_client_list_links(nw_client* client, const char* node_id, nw_buffer* json) {
@@ -817,7 +843,12 @@ int nw_client_list_links(nw_client* client, const char* node_id, nw_buffer* json
   return guarded([&] {
     Json links = Json::array();
     for (const LinkRecord& link : client->value->linksFor(node_id)) {
-      links.push_back(Json::object({{"nodeId", link.nodeId}, {"linkId", link.linkId}, {"createdAt", link.createdAt}}));
+      Json entry = Json::object({{"nodeId", link.nodeId}, {"linkId", link.linkId}, {"createdAt", link.createdAt}});
+      entry["expiresAt"] = Json(nullptr);
+      if (link.expiresAt.has_value()) {
+        entry["expiresAt"] = *link.expiresAt;
+      }
+      links.push_back(entry);
     }
     return fillJson(json, links);
   });

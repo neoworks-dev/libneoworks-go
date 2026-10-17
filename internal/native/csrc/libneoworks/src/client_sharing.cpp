@@ -99,6 +99,8 @@ Result<AccessGrant> Client::grantNode(const ShareRequest& request) {
   if (!certId.value().empty()) {
     grantRequest.certId = certId.value();
   }
+  grantRequest.expiresAt = request.expiresAt;
+  grantRequest.via = request.via;
   grantRequest.createdAt = nowText();
   Result<AccessGrant> grant = createGrant(grantRequest, nodeKey.value());
   if (!grant.ok()) {
@@ -115,6 +117,61 @@ Result<AccessGrant> Client::grantNode(const ShareRequest& request) {
   return grant;
 }
 
+std::optional<AccessGrant> Client::ownWholeGrantOn(const std::string& nodeId) const {
+  for (const AccessGrant& grant : database_->grantsForNode(nodeId)) {
+    bool mine = grant.principalType == signer_.authorType && grant.principalId == signer_.authorId;
+    if (mine && !grant.facets.has_value() && !grant.revokedAt.has_value()) {
+      return grant;
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<AccessGrant> Client::ownGrantReaching(const Node& node) const {
+  const Node* current = &node;
+  for (int step = 0; step < 64 && current != nullptr; ++step) {
+    std::optional<AccessGrant> grant = ownWholeGrantOn(current->id);
+    if (grant.has_value() || !current->parentId.has_value()) {
+      return grant;
+    }
+    current = database_->findNode(*current->parentId);
+  }
+  return std::nullopt;
+}
+
+namespace {
+
+// A grant made from another grant lasts at most as long as it.
+Result<ShareRequest> limitedToSourceExpiry(ShareRequest request, const AccessGrant& source) {
+  if (!source.expiresAt.has_value()) {
+    return request;
+  }
+  if (!request.expiresAt.has_value()) {
+    request.expiresAt = source.expiresAt;
+    return request;
+  }
+  if (*request.expiresAt > *source.expiresAt) {
+    return Status::InvalidArgument;
+  }
+  return request;
+}
+
+}  // namespace
+
+Result<ShareRequest> Client::withSourceGrant(const Node& node, ShareRequest request) const {
+  bool passesOnShare = request.principalType == "install" && signer_.authorType == "user" &&
+                       trustedOwnerOf(node) != signer_.authorId;
+  if (!passesOnShare || request.via.has_value()) {
+    return request;
+  }
+  std::optional<AccessGrant> source = ownGrantReaching(node);
+  if (!source.has_value()) {
+    return Status::Forbidden;
+  }
+  request.via = grantId(*source);
+  return limitedToSourceExpiry(std::move(request), *source);
+}
+
 Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
   lastContentError_ = CodecError{};
   const Node* node = database_->findNode(request.nodeId);
@@ -126,7 +183,11 @@ Result<AccessGrant> Client::shareNode(const ShareRequest& request) {
   if (!allowed || !withinOwnRole || !isValidRole(request.role)) {
     return Status::Forbidden;
   }
-  return grantNode(request);
+  Result<ShareRequest> sourced = withSourceGrant(*node, request);
+  if (!sourced.ok()) {
+    return sourced.status();
+  }
+  return grantNode(sourced.value());
 }
 
 Status Client::queueRevocation(const std::string& nodeId, const std::string& principalType,
@@ -163,7 +224,11 @@ Status Client::revokeAccess(const std::string& nodeId, const std::string& princi
   return queueRevocation(nodeId, principalType, principalId);
 }
 
-Result<std::string> Client::createLinkFragment(const std::string& nodeId) {
+Result<std::string> Client::createLinkFragment(const std::string& nodeId,
+                                               const std::optional<std::string>& expiresAt) {
+  if (!isFutureExpiry(expiresAt)) {
+    return Status::InvalidArgument;
+  }
   const Node* node = database_->findNode(nodeId);
   if (node == nullptr || node->deleted) {
     return Status::NotFound;
@@ -182,17 +247,18 @@ Result<std::string> Client::createLinkFragment(const std::string& nodeId) {
   return encoded;
 }
 
-Status Client::recordLink(const std::string& nodeId, const std::string& linkId) {
+Status Client::recordLink(const std::string& nodeId, const std::string& linkId,
+                          const std::optional<std::string>& expiresAt) {
   if (database_->findNode(nodeId) == nullptr) {
     return Status::NotFound;
   }
-  return database_->putLink(LinkEntry{nodeId, linkId, nowText()});
+  return database_->putLink(LinkEntry{nodeId, linkId, nowText(), expiresAt});
 }
 
 std::vector<LinkRecord> Client::linksFor(const std::string& nodeId) const {
   std::vector<LinkRecord> records;
   for (const LinkEntry& entry : database_->linksForNode(nodeId)) {
-    records.push_back(LinkRecord{entry.nodeId, entry.linkId, entry.createdAt});
+    records.push_back(LinkRecord{entry.nodeId, entry.linkId, entry.createdAt, entry.expiresAt});
   }
   return records;
 }

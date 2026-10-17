@@ -32,6 +32,12 @@ struct AccessLogEntry {
   // User actors granting to an install: that install's delegation certificate.
   // Install actors: their own certificate (required).
   std::optional<std::string> certId;
+  // Grants only: when the grant stops giving access, YYYY-MM-DDTHH:MM:SSZ. The granter signs it,
+  // so the server cannot extend it.
+  std::optional<std::string> expiresAt;
+  // Grants only: the id of the grant this one was made from (grantId). The granter signs it, so
+  // the server cannot move a grant under another source.
+  std::optional<std::string> via;
   Bytes signature;
 };
 
@@ -103,7 +109,7 @@ Status verifyEntryActor(const AccessLogEntry& entry, const AuthorityContext& con
 //    certificate carries `<collection>:share` and whose own role is at least the granted role;
 //  - grant to an install: the install's own user, at most their own role;
 //  - revoke: the owner (or such an install) anyone; a user their own installs and their own grant.
-// Certificate expiry is not checked: entries carry no time, so the server enforces it.
+// Neither certificate expiry nor a grant's expiresAt is checked: the server enforces both.
 Status checkAuthority(const AccessLogEntry& entry, const ChainState& stateBefore, const AuthorityContext& context);
 
 }  // namespace nw
