@@ -13,29 +13,6 @@ namespace {
 
 constexpr size_t kSafetyCodeGroups = 6;
 
-std::optional<int64_t> millisOf(const IndexedNode& entry, uint32_t ordinal) {
-  auto found = entry.values.find(ordinal);
-  if (found == entry.values.end()) {
-    return std::nullopt;
-  }
-  const WideInteger& integer = found->second.integer;
-  if (integer.negative) {
-    return -static_cast<int64_t>(integer.magnitude);
-  }
-  return static_cast<int64_t>(integer.magnitude);
-}
-
-bool overlaps(int64_t start, int64_t end, int64_t rangeStart, int64_t rangeEnd) {
-  return start < rangeEnd && std::max(end, start + 1) > rangeStart;
-}
-
-const TableDescriptor* tableIn(const SchemaDescriptor* schema, const std::string& table) {
-  if (schema == nullptr) {
-    return nullptr;
-  }
-  return schema->tableByName(table);
-}
-
 }  // namespace
 
 Result<std::vector<QueryRow>> Client::query(const std::string& collection, const std::string& table,
@@ -50,41 +27,6 @@ Result<std::vector<QueryRow>> Client::query(const std::string& collection, const
     return compiled.status();
   }
   return runQuery(compiled.value(), index_, collection, table);
-}
-
-std::vector<std::string> Client::queryRange(const std::string& collection, const std::string& table,
-                                            int64_t rangeStart, int64_t rangeEnd) {
-  std::vector<std::string> matches;
-  const TableDescriptor* descriptor = tableIn(descriptorFor(collection), table);
-  if (descriptor == nullptr || !descriptor->timeRange.has_value()) {
-    return matches;
-  }
-  for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
-    std::optional<int64_t> start = millisOf(entry, descriptor->timeRange->start);
-    std::optional<int64_t> end = millisOf(entry, descriptor->timeRange->end);
-    bool inRange = start.has_value() && end.has_value() && overlaps(*start, *end, rangeStart, rangeEnd);
-    if (entry.table == table && inRange) {
-      matches.push_back(nodeId);
-    }
-  }
-  return matches;
-}
-
-std::vector<std::string> Client::search(const std::string& collection, const std::string& table,
-                                        const std::string& needle) {
-  std::vector<std::string> matches;
-  if (tableIn(descriptorFor(collection), table) == nullptr) {
-    return matches;
-  }
-  std::string lowered = lowercaseAscii(needle);
-  for (const auto& [nodeId, entry] : index_.nodesOf(collection)) {
-    bool found = std::any_of(entry.searchTexts.begin(), entry.searchTexts.end(),
-                             [&](const std::string& text) { return text.find(lowered) != std::string::npos; });
-    if (entry.table == table && found) {
-      matches.push_back(nodeId);
-    }
-  }
-  return matches;
 }
 
 PublicIdentity Client::ownIdentity() const {

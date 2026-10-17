@@ -546,24 +546,6 @@ int nw_client_effective_role(nw_client* client, const char* node_id, nw_buffer* 
   return guarded([&] { return fillText(role, client->value->effectiveRole(node_id)); });
 }
 
-int nw_client_query_range(nw_client* client, const char* collection, const char* table, int64_t start_unix_millis,
-                          int64_t end_unix_millis, nw_buffer* json) {
-  if (!hasArguments(client, collection) || table == nullptr || json == nullptr) {
-    return NW_ERR_INVALID_ARGUMENT;
-  }
-  return guarded([&] {
-    return fillJson(json, client->value->queryRange(collection, table, start_unix_millis, end_unix_millis));
-  });
-}
-
-int nw_client_search(nw_client* client, const char* collection, const char* table, const char* needle,
-                     nw_buffer* json) {
-  if (!hasArguments(client, collection) || table == nullptr || needle == nullptr || json == nullptr) {
-    return NW_ERR_INVALID_ARGUMENT;
-  }
-  return guarded([&] { return fillJson(json, client->value->search(collection, table, needle)); });
-}
-
 int nw_client_query(nw_client* client, const char* collection, const char* table, const char* query_json,
                     nw_buffer* json) {
   if (!hasArguments(client, collection) || table == nullptr || query_json == nullptr || json == nullptr) {

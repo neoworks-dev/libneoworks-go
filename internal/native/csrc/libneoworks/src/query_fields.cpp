@@ -176,10 +176,7 @@ std::string lowercaseAscii(std::string text) {
   return text;
 }
 
-std::optional<FieldType> filterableType(const FieldDescriptor& field) {
-  if (field.container.kind != ContainerKind::Singular) {
-    return std::nullopt;
-  }
+std::optional<FieldType> valueType(const FieldDescriptor& field) {
   if (field.value.kind == ValueKind::Enum) {
     return FieldType::Enum;
   }
@@ -193,6 +190,26 @@ std::optional<FieldType> filterableType(const FieldDescriptor& field) {
     return scalarType(field.value.scalar);
   }
   return std::nullopt;
+}
+
+std::optional<FieldType> filterableType(const FieldDescriptor& field) {
+  if (field.container.kind != ContainerKind::Singular) {
+    return std::nullopt;
+  }
+  return valueType(field);
+}
+
+bool isList(const FieldDescriptor& field) {
+  ContainerKind kind = field.container.kind;
+  return kind == ContainerKind::RepeatedPacked || kind == ContainerKind::RepeatedLen ||
+         kind == ContainerKind::WrapperRepeated;
+}
+
+bool isFile(const FieldDescriptor& field) { return field.value.kind == ValueKind::File; }
+
+bool isFilterableFileMember(const FieldDescriptor& member) {
+  return member.ordinal == kFileNameOrdinal || member.ordinal == kFileMediaTypeOrdinal ||
+         member.ordinal == kFileSizeOrdinal;
 }
 
 bool isOrdered(FieldType type) {
@@ -224,20 +241,78 @@ std::optional<Comparable> toComparable(const Json& value, const FieldDescriptor&
   return fromString(value.get<std::string>(), type, field.value);
 }
 
+namespace {
+
+MemberValues fileMembersOf(const Json& file) {
+  MemberValues members;
+  if (!file.is_object()) {
+    return members;
+  }
+  for (const FieldDescriptor& member : fileModel().fields) {
+    auto value = file.find(member.name);
+    if (!isFilterableFileMember(member) || value == file.end()) {
+      continue;
+    }
+    std::optional<Comparable> comparable = toComparable(*value, member, *filterableType(member));
+    if (comparable.has_value()) {
+      members.emplace(member.ordinal, std::move(*comparable));
+    }
+  }
+  return members;
+}
+
+MemberValues memberValuesOf(const FieldDescriptor& field, const Json& value) {
+  if (isFile(field)) {
+    return fileMembersOf(value);
+  }
+  MemberValues members;
+  std::optional<FieldType> type = valueType(field);
+  if (!type.has_value()) {
+    return members;
+  }
+  std::optional<Comparable> comparable = toComparable(value, field, *type);
+  if (comparable.has_value()) {
+    members.emplace(kWholeValue, std::move(*comparable));
+  }
+  return members;
+}
+
+bool isIndexed(const FieldDescriptor& field) { return isFile(field) || valueType(field).has_value(); }
+
+}  // namespace
+
 FieldValues fieldValuesOf(const ModelDescriptor& model, const Json& content) {
   FieldValues values;
   for (const FieldDescriptor& field : model.fields) {
-    std::optional<FieldType> type = filterableType(field);
     auto value = content.find(field.name);
-    if (!type.has_value() || value == content.end() || value->is_null()) {
+    bool present = value != content.end() && !value->is_null();
+    if (field.container.kind != ContainerKind::Singular || !isIndexed(field) || !present) {
       continue;
     }
-    std::optional<Comparable> comparable = toComparable(*value, field, *type);
-    if (comparable.has_value()) {
-      values.emplace(field.ordinal, std::move(*comparable));
+    MemberValues members = memberValuesOf(field, *value);
+    if (!members.empty()) {
+      values.emplace(field.ordinal, std::move(members));
     }
   }
   return values;
+}
+
+ListValues listValuesOf(const ModelDescriptor& model, const Json& content) {
+  ListValues lists;
+  for (const FieldDescriptor& field : model.fields) {
+    auto value = content.find(field.name);
+    bool present = value != content.end() && value->is_array();
+    if (!isList(field) || !isIndexed(field) || !present) {
+      continue;
+    }
+    std::vector<MemberValues>& elements = lists[field.ordinal];
+    for (const Json& element : *value) {
+      if (!element.is_null()) {
+        elements.push_back(memberValuesOf(field, element));
+      }
+    }
+  }
+  return lists;
 }
 
 }  // namespace nw

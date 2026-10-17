@@ -101,9 +101,115 @@ int compareValues(const Comparable& left, const Comparable& right) {
   return 0;
 }
 
+int comparePart(const Comparable* left, const Comparable* right) {
+  if (left == nullptr || right == nullptr) {
+    return static_cast<int>(left != nullptr) - static_cast<int>(right != nullptr);
+  }
+  return compareValues(*left, *right);
+}
+
+int compareToProbe(const IndexEntry& entry, const IndexProbe& probe) {
+  for (size_t position = 0; position < probe.prefix.size(); ++position) {
+    int comparison = comparePart(entry.parts[position], probe.prefix[position]);
+    if (comparison != 0) {
+      return comparison;
+    }
+  }
+  if (probe.afterEqual) {
+    return -1;
+  }
+  return 1;
+}
+
+bool IndexEntryLess::operator()(const IndexEntry& left, const IndexEntry& right) const {
+  for (size_t position = 0; position < left.parts.size(); ++position) {
+    int comparison = comparePart(left.parts[position], right.parts[position]);
+    if (comparison != 0) {
+      return comparison < 0;
+    }
+  }
+  return *left.nodeId < *right.nodeId;
+}
+
+namespace {
+
+const Comparable* wholeValueOf(const IndexedNode& node, uint32_t ordinal) {
+  auto field = node.values.find(ordinal);
+  if (field == node.values.end()) {
+    return nullptr;
+  }
+  auto whole = field->second.find(kWholeValue);
+  if (whole == field->second.end()) {
+    return nullptr;
+  }
+  return &whole->second;
+}
+
+IndexEntry entryOf(const SortedIndex& index, const std::string& nodeId, const IndexedNode& node) {
+  IndexEntry entry;
+  for (uint32_t ordinal : index.fields) {
+    entry.parts.push_back(wholeValueOf(node, ordinal));
+  }
+  entry.nodeId = &nodeId;
+  entry.node = &node;
+  return entry;
+}
+
+bool sameDefinitions(const std::vector<SortedIndex>& kept, const std::vector<IndexDescriptor>& definitions) {
+  if (kept.size() != definitions.size()) {
+    return false;
+  }
+  for (size_t position = 0; position < kept.size(); ++position) {
+    if (kept[position].fields != definitions[position].fields) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+std::vector<SortedIndex>* FieldIndex::indexesFor(const std::string& collection, const std::string& table) {
+  auto ofCollection = indexes_.find(collection);
+  if (ofCollection == indexes_.end()) {
+    return nullptr;
+  }
+  auto ofTable = ofCollection->second.find(table);
+  if (ofTable == ofCollection->second.end()) {
+    return nullptr;
+  }
+  return &ofTable->second;
+}
+
+void FieldIndex::addToIndexes(const std::string& collection, const std::string& nodeId, const IndexedNode& node) {
+  std::vector<SortedIndex>* kept = indexesFor(collection, node.table);
+  if (kept == nullptr) {
+    return;
+  }
+  for (SortedIndex& index : *kept) {
+    index.entries.insert(entryOf(index, nodeId, node));
+  }
+}
+
+void FieldIndex::removeFromIndexes(const std::string& collection, const std::string& nodeId, const IndexedNode& node) {
+  std::vector<SortedIndex>* kept = indexesFor(collection, node.table);
+  if (kept == nullptr) {
+    return;
+  }
+  for (SortedIndex& index : *kept) {
+    index.entries.erase(entryOf(index, nodeId, node));
+  }
+}
+
 void FieldIndex::put(const std::string& collection, const std::string& nodeId, IndexedNode entry) {
-  collections_[collection].insert_or_assign(nodeId, std::move(entry));
+  std::map<std::string, IndexedNode>& nodes = collections_[collection];
+  auto existing = nodes.find(nodeId);
+  if (existing != nodes.end()) {
+    removeFromIndexes(collection, existing->first, existing->second);
+  }
+  auto stored = nodes.insert_or_assign(nodeId, std::move(entry)).first;
   collectionOfNode_[nodeId] = collection;
+  addToIndexes(collection, stored->first, stored->second);
 }
 
 void FieldIndex::erase(const std::string& nodeId) {
@@ -111,11 +217,17 @@ void FieldIndex::erase(const std::string& nodeId) {
   if (found == collectionOfNode_.end()) {
     return;
   }
-  collections_[found->second].erase(nodeId);
+  std::map<std::string, IndexedNode>& nodes = collections_[found->second];
+  auto stored = nodes.find(nodeId);
+  if (stored != nodes.end()) {
+    removeFromIndexes(found->second, stored->first, stored->second);
+    nodes.erase(stored);
+  }
   collectionOfNode_.erase(found);
 }
 
 void FieldIndex::eraseCollection(const std::string& collection) {
+  indexes_.erase(collection);
   auto found = collections_.find(collection);
   if (found == collections_.end()) {
     return;
@@ -127,8 +239,39 @@ void FieldIndex::eraseCollection(const std::string& collection) {
 }
 
 void FieldIndex::clear() {
+  indexes_.clear();
   collections_.clear();
   collectionOfNode_.clear();
+}
+
+void FieldIndex::defineIndexes(const std::string& collection, const std::string& table,
+                               const std::vector<IndexDescriptor>& definitions) {
+  std::vector<SortedIndex>& kept = indexes_[collection][table];
+  if (sameDefinitions(kept, definitions)) {
+    return;
+  }
+  kept.clear();
+  for (const IndexDescriptor& definition : definitions) {
+    kept.push_back(SortedIndex{definition.fields, {}});
+  }
+  for (const auto& [nodeId, node] : nodesOf(collection)) {
+    if (node.table == table) {
+      addToIndexes(collection, nodeId, node);
+    }
+  }
+}
+
+const std::vector<SortedIndex>& FieldIndex::indexesOf(const std::string& collection, const std::string& table) const {
+  static const std::vector<SortedIndex> none;
+  auto ofCollection = indexes_.find(collection);
+  if (ofCollection == indexes_.end()) {
+    return none;
+  }
+  auto ofTable = ofCollection->second.find(table);
+  if (ofTable == ofCollection->second.end()) {
+    return none;
+  }
+  return ofTable->second;
 }
 
 const IndexedNode* FieldIndex::find(const std::string& collection, const std::string& nodeId) const {

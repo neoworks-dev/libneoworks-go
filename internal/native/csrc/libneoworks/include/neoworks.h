@@ -269,18 +269,19 @@ NW_API int nw_client_get_node(nw_client* client, const char* node_id, nw_buffer*
 NW_API int nw_client_list_nodes(nw_client* client, const char* parent_id, const char* collection,
                                 nw_buffer* json);
 NW_API int nw_client_effective_role(nw_client* client, const char* node_id, nw_buffer* role);
-/* Ids of rows of table whose @neoworks.timeRange interval overlaps [start, end), as a JSON array. */
-NW_API int nw_client_query_range(nw_client* client, const char* collection, const char* table,
-                                 int64_t start_unix_millis, int64_t end_unix_millis, nw_buffer* json);
-/* Ids of rows of table whose @neoworks.searchable fields contain needle, case-insensitively. */
-NW_API int nw_client_search(nw_client* client, const char* collection, const char* table, const char* needle,
-                            nw_buffer* json);
 /* The rows of table in collection that match query_json, a Prisma-style filter:
  *   {"where": {...}, "orderBy": {"field": "asc"} | [{"field": "desc"}, ...], "take": n,
  *    "include": {"refField": true}}
  * where holds field filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
  * gte and, for text, contains, startsWith, endsWith with "mode": "insensitive") and AND, OR and NOT
  * lists or objects. A reference compares by the id of its row. Timestamps compare as instants.
+ * A File field takes filters on its members, {"image": {"name": {"contains": "beach", "mode":
+ * "insensitive"}, "size": {"gt": 1000}}} (name, mediaType, size), and orders by them,
+ * "orderBy": {"image": {"name": "asc"}}. A list field takes some, every and none with a filter on
+ * its elements, {"emails": {"some": {"contains": "anna@"}}}, and has for one plain element; the
+ * members of one File element have to match together. An unset list has no elements.
+ * The sorted indexes of the table's schema answer equality and range filters on their leading
+ * fields and orderBy on them; any other query reads every row, with the same result.
  * Writes [{"id": id, "include"?: {"refField": id|null}}]: include names single references whose
  * row is read along, null when that row is deleted or not readable here. It reads the in-memory
  * index of field values and decrypts nothing. NW_ERR_INVALID_ARGUMENT: a field or table the

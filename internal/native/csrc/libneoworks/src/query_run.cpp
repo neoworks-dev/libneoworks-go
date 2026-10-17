@@ -1,7 +1,11 @@
 #include <algorithm>
 
+#include <iterator>
+#include <set>
+
 #include "query.hpp"
 #include "query_fields.hpp"
+#include "query_plan.hpp"
 
 namespace nw {
 
@@ -67,22 +71,34 @@ bool textHolds(FilterOperator filterOperator, const std::string& text, const std
   return text.size() >= part.size() && text.compare(text.size() - part.size(), part.size(), part) == 0;
 }
 
-Comparable foldedForMode(const FieldTest& test, const Comparable& value) {
-  Comparable folded = value;
-  if (test.insensitive && value.kind == Comparable::Kind::Text) {
-    folded.text = lowercaseAscii(value.text);
+bool isTextOperator(FilterOperator filterOperator) {
+  return filterOperator == FilterOperator::Contains || filterOperator == FilterOperator::StartsWith ||
+         filterOperator == FilterOperator::EndsWith;
+}
+
+bool matchesPresentText(const FieldTest& test, const Comparable& value) {
+  const std::string& part = test.operands.front()->text;
+  if (!test.insensitive) {
+    return textHolds(test.filterOperator, value.text, part);
   }
-  return folded;
+  return textHolds(test.filterOperator, lowercaseAscii(value.text), part);
+}
+
+bool matchesPresentOrder(const FieldTest& test, const Comparable& value) {
+  const Comparable& operand = *test.operands.front();
+  if (!test.insensitive || value.kind != Comparable::Kind::Text) {
+    return orderingHolds(test.filterOperator, compareValues(value, operand));
+  }
+  Comparable folded = value;
+  folded.text = lowercaseAscii(value.text);
+  return orderingHolds(test.filterOperator, compareValues(folded, operand));
 }
 
 bool matchesPresentValue(const FieldTest& test, const Comparable& value) {
-  const Comparable& operand = *test.operands.front();
-  Comparable folded = foldedForMode(test, value);
-  if (test.filterOperator == FilterOperator::Contains || test.filterOperator == FilterOperator::StartsWith ||
-      test.filterOperator == FilterOperator::EndsWith) {
-    return textHolds(test.filterOperator, folded.text, operand.text);
+  if (isTextOperator(test.filterOperator)) {
+    return matchesPresentText(test, value);
   }
-  return orderingHolds(test.filterOperator, compareValues(folded, operand));
+  return matchesPresentOrder(test, value);
 }
 
 bool isEquality(FilterOperator filterOperator) {
@@ -125,20 +141,43 @@ Truth testTruth(const FieldTest& test, const Comparable* value) {
   return truthOf(matchesPresentValue(test, *value));
 }
 
-const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal) {
-  auto found = node.values.find(ordinal);
-  if (found == node.values.end()) {
+// Where a test looks: the row's own fields, or one element of a list field.
+struct Scope {
+  const IndexedNode& node;
+  const MemberValues* element = nullptr;
+};
+
+const Comparable* memberOf(const MemberValues& members, uint32_t member) {
+  auto found = members.find(member);
+  if (found == members.end()) {
     return nullptr;
   }
   return &found->second;
 }
 
-Truth conditionTruth(const Condition& condition, const IndexedNode& node);
+const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal, uint32_t member) {
+  auto field = node.values.find(ordinal);
+  if (field == node.values.end()) {
+    return nullptr;
+  }
+  return memberOf(field->second, member);
+}
 
-Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node) {
+const Comparable* valueOf(const Scope& scope, const FieldTest& test) {
+  if (scope.element != nullptr) {
+    return memberOf(*scope.element, test.member);
+  }
+  return valueOf(scope.node, test.ordinal, test.member);
+}
+
+Truth conditionTruth(const Condition& condition, const Scope& scope);
+
+// True when every item is, false as soon as one is, otherwise unknown. No items is true.
+template <typename Items, typename Evaluate>
+Truth allOf(const Items& items, Evaluate evaluate) {
   Truth combined = Truth::True;
-  for (const Condition& child : conditions) {
-    Truth truth = conditionTruth(child, node);
+  for (const auto& item : items) {
+    Truth truth = evaluate(item);
     if (truth == Truth::False) {
       return Truth::False;
     }
@@ -149,10 +188,12 @@ Truth allTruth(const std::vector<Condition>& conditions, const IndexedNode& node
   return combined;
 }
 
-Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node) {
+// True as soon as one item is, otherwise unknown when one is. No items is false.
+template <typename Items, typename Evaluate>
+Truth anyOf(const Items& items, Evaluate evaluate) {
   Truth combined = Truth::False;
-  for (const Condition& child : conditions) {
-    Truth truth = conditionTruth(child, node);
+  for (const auto& item : items) {
+    Truth truth = evaluate(item);
     if (truth == Truth::True) {
       return Truth::True;
     }
@@ -163,24 +204,49 @@ Truth anyTruth(const std::vector<Condition>& conditions, const IndexedNode& node
   return combined;
 }
 
-Truth conditionTruth(const Condition& condition, const IndexedNode& node) {
+const std::vector<MemberValues>& elementsOf(const IndexedNode& node, uint32_t listOrdinal) {
+  static const std::vector<MemberValues> none;
+  auto found = node.lists.find(listOrdinal);
+  if (found == node.lists.end()) {
+    return none;
+  }
+  return found->second;
+}
+
+Truth elementsTruth(const Condition& condition, const IndexedNode& node) {
+  const std::vector<MemberValues>& elements = elementsOf(node, condition.listOrdinal);
+  const Condition& child = condition.children.front();
+  auto holds = [&](const MemberValues& element) { return conditionTruth(child, Scope{node, &element}); };
+  if (condition.quantifier == Quantifier::Every) {
+    return allOf(elements, holds);
+  }
+  Truth some = anyOf(elements, holds);
+  if (condition.quantifier == Quantifier::Some) {
+    return some;
+  }
+  return negated(some);
+}
+
+Truth conditionTruth(const Condition& condition, const Scope& scope) {
   switch (condition.type) {
     case Condition::Type::All:
-      return allTruth(condition.children, node);
+      return allOf(condition.children, [&](const Condition& child) { return conditionTruth(child, scope); });
     case Condition::Type::Any:
-      return anyTruth(condition.children, node);
+      return anyOf(condition.children, [&](const Condition& child) { return conditionTruth(child, scope); });
     case Condition::Type::Not:
-      return negated(conditionTruth(condition.children.front(), node));
+      return negated(conditionTruth(condition.children.front(), scope));
     case Condition::Type::Field:
-      return testTruth(condition.test, valueOf(node, condition.test.ordinal));
+      return testTruth(condition.test, valueOf(scope, condition.test));
+    case Condition::Type::Elements:
+      return elementsTruth(condition, scope.node);
   }
   return Truth::False;
 }
 
 // A missing value sorts before any present one.
-int compareForOrder(const IndexedNode& left, const IndexedNode& right, uint32_t ordinal) {
-  const Comparable* leftValue = valueOf(left, ordinal);
-  const Comparable* rightValue = valueOf(right, ordinal);
+int compareForOrder(const IndexedNode& left, const IndexedNode& right, const OrderKey& key) {
+  const Comparable* leftValue = valueOf(left, key.ordinal, key.member);
+  const Comparable* rightValue = valueOf(right, key.ordinal, key.member);
   if (leftValue == nullptr || rightValue == nullptr) {
     return static_cast<int>(leftValue != nullptr) - static_cast<int>(rightValue != nullptr);
   }
@@ -189,7 +255,7 @@ int compareForOrder(const IndexedNode& left, const IndexedNode& right, uint32_t 
 
 bool sortsBefore(const std::vector<OrderKey>& keys, const IndexedNode& left, const IndexedNode& right) {
   for (const OrderKey& key : keys) {
-    int comparison = compareForOrder(left, right, key.ordinal);
+    int comparison = compareForOrder(left, right, key);
     if (comparison == 0) {
       continue;
     }
@@ -220,19 +286,126 @@ std::vector<std::pair<std::string, std::optional<std::string>>> includedRows(con
   return included;
 }
 
+using Hit = std::pair<const std::string*, const IndexedNode*>;
+
+bool matches(const Query& query, const IndexedNode& node) {
+  return conditionTruth(query.where, Scope{node}) == Truth::True;
+}
+
+bool sortsByIdBefore(const Hit& left, const Hit& right) { return *left.first < *right.first; }
+
+std::vector<Hit> scannedHits(const Query& query, const FieldIndex& index, const std::string& collection,
+                             const std::string& table) {
+  std::vector<Hit> hits;
+  for (const auto& [nodeId, node] : index.nodesOf(collection)) {
+    if (node.table == table && matches(query, node)) {
+      hits.emplace_back(&nodeId, &node);
+    }
+  }
+  return hits;
+}
+
+using EntryIterator = std::set<IndexEntry, IndexEntryLess>::const_iterator;
+
+struct EntryRange {
+  EntryIterator first;
+  EntryIterator last;
+};
+
+EntryRange rangeOf(const IndexScan& scan) {
+  const std::set<IndexEntry, IndexEntryLess>& entries = scan.index->entries;
+  EntryRange range{entries.lower_bound(scan.lower), entries.lower_bound(scan.upper)};
+  bool inverted = range.first != entries.end() && compareToProbe(*range.first, scan.upper) >= 0;
+  if (inverted) {
+    range.last = range.first;
+  }
+  return range;
+}
+
+bool sameOrderValues(const IndexEntry& left, const IndexEntry& right, size_t partCount) {
+  for (size_t position = 0; position < partCount; ++position) {
+    if (comparePart(left.parts[position], right.parts[position]) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Rows with equal order values go by id, as they do when the rows are sorted after the scan.
+void flushGroup(std::vector<Hit>& group, std::vector<Hit>& hits) {
+  std::sort(group.begin(), group.end(), sortsByIdBefore);
+  hits.insert(hits.end(), group.begin(), group.end());
+  group.clear();
+}
+
+bool takeReached(const Query& query, const std::vector<Hit>& hits) {
+  return query.take.has_value() && hits.size() >= *query.take;
+}
+
+// Reads entries in index order and stops after the group of equal order values that fills `take`.
+template <typename Iterator>
+std::vector<Hit> orderedHits(const Query& query, const IndexScan& scan, Iterator first, Iterator last) {
+  std::vector<Hit> hits;
+  std::vector<Hit> group;
+  const IndexEntry* groupStart = nullptr;
+  for (Iterator entry = first; entry != last; ++entry) {
+    bool newGroup = groupStart == nullptr || !sameOrderValues(*groupStart, *entry, scan.orderPartCount);
+    if (newGroup) {
+      flushGroup(group, hits);
+      groupStart = &*entry;
+    }
+    if (newGroup && takeReached(query, hits)) {
+      return hits;
+    }
+    if (matches(query, *entry->node)) {
+      group.emplace_back(entry->nodeId, entry->node);
+    }
+  }
+  flushGroup(group, hits);
+  return hits;
+}
+
+std::vector<Hit> orderedIndexHits(const Query& query, const IndexScan& scan) {
+  EntryRange range = rangeOf(scan);
+  if (scan.descending) {
+    return orderedHits(query, scan, std::make_reverse_iterator(range.last), std::make_reverse_iterator(range.first));
+  }
+  return orderedHits(query, scan, range.first, range.last);
+}
+
+std::vector<Hit> indexedHits(const Query& query, const IndexScan& scan) {
+  if (scan.ordersResult) {
+    return orderedIndexHits(query, scan);
+  }
+  EntryRange range = rangeOf(scan);
+  std::vector<Hit> hits;
+  for (EntryIterator entry = range.first; entry != range.last; ++entry) {
+    if (matches(query, *entry->node)) {
+      hits.emplace_back(entry->nodeId, entry->node);
+    }
+  }
+  std::sort(hits.begin(), hits.end(), sortsByIdBefore);
+  return hits;
+}
+
 }  // namespace
 
 std::vector<QueryRow> runQuery(const Query& query, const FieldIndex& index, const std::string& collection,
                                const std::string& table) {
-  std::vector<std::pair<const std::string*, const IndexedNode*>> hits;
-  for (const auto& [nodeId, node] : index.nodesOf(collection)) {
-    if (node.table == table && conditionTruth(query.where, node) == Truth::True) {
-      hits.emplace_back(&nodeId, &node);
-    }
+  std::optional<IndexScan> scan = planIndexScan(query, index.indexesOf(collection, table));
+  std::vector<Hit> hits;
+  bool ordered = false;
+  if (scan.has_value()) {
+    hits = indexedHits(query, *scan);
+    ordered = scan->ordersResult;
+  } else {
+    hits = scannedHits(query, index, collection, table);
   }
-  std::stable_sort(hits.begin(), hits.end(), [&](const auto& left, const auto& right) {
-    return sortsBefore(query.orderBy, *left.second, *right.second);
-  });
+  if (!ordered) {
+    std::stable_sort(hits.begin(), hits.end(), [&](const Hit& left, const Hit& right) {
+      return sortsBefore(query.orderBy, *left.second, *right.second);
+    });
+  }
   size_t count = hits.size();
   if (query.take.has_value()) {
     count = std::min(count, *query.take);

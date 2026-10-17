@@ -11,6 +11,7 @@
 
 #include "crypto.hpp"
 #include "json.hpp"
+#include "query_fields.hpp"
 #include "schema_values.hpp"
 #include "wire.hpp"
 
@@ -578,13 +579,19 @@ std::optional<FacetDescriptor> parseFacet(const Json& json) {
   return FacetDescriptor{*name, *tag, std::move(*fields)};
 }
 
-std::optional<TimeRangeDescriptor> parseTimeRange(const Json& json) {
-  std::optional<uint32_t> start = readOrdinal(json, "start");
-  std::optional<uint32_t> end = readOrdinal(json, "end");
-  if (!hasOnlyKeys(json, {"start", "end"}) || !start.has_value() || !end.has_value() || *start == *end) {
-    return std::nullopt;
+bool parseIndexes(const Json& json, std::vector<IndexDescriptor>& into) {
+  const Json* indexes = readArray(json, "indexes");
+  if (indexes == nullptr) {
+    return false;
   }
-  return TimeRangeDescriptor{*start, *end};
+  for (const Json& entry : *indexes) {
+    std::optional<std::vector<uint32_t>> fields = readOrdinalList(entry, "fields");
+    if (!hasOnlyKeys(entry, {"fields"}) || !fields.has_value() || fields->empty()) {
+      return false;
+    }
+    into.push_back(IndexDescriptor{std::move(*fields)});
+  }
+  return true;
 }
 
 bool parseOptionalOrdinal(const Json& json, const char* key, std::optional<uint32_t>& into) {
@@ -595,17 +602,6 @@ bool parseOptionalOrdinal(const Json& json, const char* key, std::optional<uint3
     return true;
   }
   into = readOrdinal(json, key);
-  return into.has_value();
-}
-
-bool parseOptionalTimeRange(const Json& json, std::optional<TimeRangeDescriptor>& into) {
-  if (!json.contains("timeRange")) {
-    return false;
-  }
-  if (json.at("timeRange").is_null()) {
-    return true;
-  }
-  into = parseTimeRange(json.at("timeRange"));
   return into.has_value();
 }
 
@@ -625,22 +621,19 @@ bool parseFacets(const Json& json, std::vector<FacetDescriptor>& into) {
 }
 
 std::optional<TableDescriptor> parseTable(const Json& json) {
-  if (!hasOnlyKeys(json, {"model", "facets", "searchable", "title", "timeRange", "belongsTo", "cascade"})) {
+  if (!hasOnlyKeys(json, {"model", "facets", "title", "belongsTo", "cascade", "indexes"})) {
     return std::nullopt;
   }
   TableDescriptor table;
   std::optional<std::string> model = readString(json, "model");
-  std::optional<std::vector<uint32_t>> searchable = readOrdinalList(json, "searchable");
   std::optional<std::vector<uint32_t>> cascade = readOrdinalList(json, "cascade");
-  bool wellFormed = model.has_value() && searchable.has_value() && cascade.has_value() &&
-                    parseOptionalOrdinal(json, "title", table.title) &&
-                    parseOptionalOrdinal(json, "belongsTo", table.belongsTo) &&
-                    parseOptionalTimeRange(json, table.timeRange) && parseFacets(json, table.facets);
+  bool wellFormed = model.has_value() && cascade.has_value() && parseOptionalOrdinal(json, "title", table.title) &&
+                    parseOptionalOrdinal(json, "belongsTo", table.belongsTo) && parseFacets(json, table.facets) &&
+                    parseIndexes(json, table.indexes);
   if (!wellFormed) {
     return std::nullopt;
   }
   table.modelName = *model;
-  table.searchable = std::move(*searchable);
   table.cascade = std::move(*cascade);
   return table;
 }
@@ -698,34 +691,29 @@ bool isTextValue(const ValueShape& value) {
   return value.kind == ValueKind::File || (value.kind == ValueKind::Scalar && value.scalar == Scalar::String);
 }
 
-// A string or a File, which is indexed by its name.
-bool isTextField(const FieldDescriptor* field, bool allowLists) {
-  if (field == nullptr || !isTextValue(field->value)) {
-    return false;
-  }
-  ContainerKind kind = field->container.kind;
-  bool list = kind == ContainerKind::RepeatedLen || kind == ContainerKind::WrapperRepeated;
-  return kind == ContainerKind::Singular || (allowLists && list);
+// A string, or a File whose name is the title.
+bool isTitleField(const FieldDescriptor* field) {
+  return field != nullptr && field->container.kind == ContainerKind::Singular && isTextValue(field->value);
 }
 
-bool isSingularTimestamp(const FieldDescriptor* field) {
-  return field != nullptr && field->container.kind == ContainerKind::Singular &&
-         field->value.kind == ValueKind::Scalar && field->value.scalar == Scalar::Timestamp;
+bool titleFitsModel(const TableDescriptor& table) {
+  return !table.title.has_value() || isTitleField(table.model->fieldByOrdinal(*table.title));
+}
+
+bool indexFits(const TableDescriptor& table, const IndexDescriptor& index) {
+  std::set<uint32_t> distinct(index.fields.begin(), index.fields.end());
+  if (distinct.size() != index.fields.size()) {
+    return false;
+  }
+  return std::all_of(index.fields.begin(), index.fields.end(), [&](uint32_t ordinal) {
+    const FieldDescriptor* field = table.model->fieldByOrdinal(ordinal);
+    return field != nullptr && filterableType(*field).has_value();
+  });
 }
 
 bool indexesFitModel(const TableDescriptor& table) {
-  const ModelDescriptor& model = *table.model;
-  bool searchableFit = std::all_of(table.searchable.begin(), table.searchable.end(),
-                                   [&](uint32_t ordinal) { return isTextField(model.fieldByOrdinal(ordinal), true); });
-  bool titleFits = !table.title.has_value() || isTextField(model.fieldByOrdinal(*table.title), false);
-  if (!table.timeRange.has_value()) {
-    return searchableFit && titleFits;
-  }
-  const TimeRangeDescriptor& range = *table.timeRange;
-  bool rangeFits = isSingularTimestamp(model.fieldByOrdinal(range.start)) &&
-                   isSingularTimestamp(model.fieldByOrdinal(range.end)) &&
-                   table.facetOfField(range.start) == table.facetOfField(range.end);
-  return searchableFit && titleFits && rangeFits;
+  return std::all_of(table.indexes.begin(), table.indexes.end(),
+                     [&](const IndexDescriptor& index) { return indexFits(table, index); });
 }
 
 bool isReferenceField(const FieldDescriptor* field) {
@@ -764,7 +752,8 @@ bool resolveTables(SchemaDescriptor& schema) {
     }
   }
   for (const TableDescriptor& table : schema.tables) {
-    if (!facetsPartitionModel(table) || !indexesFitModel(table) || !relationsFitModel(schema, table)) {
+    if (!facetsPartitionModel(table) || !titleFitsModel(table) || !indexesFitModel(table) ||
+        !relationsFitModel(schema, table)) {
       return false;
     }
   }

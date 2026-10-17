@@ -7,45 +7,12 @@ namespace nw {
 
 namespace {
 
-// A string is indexed as it is, a File by its name.
-void addSearchText(const Json& value, std::vector<std::string>& texts) {
-  if (value.is_string()) {
-    texts.push_back(lowercaseAscii(value.get<std::string>()));
-    return;
-  }
-  if (value.is_object() && value.contains("name") && value.at("name").is_string()) {
-    texts.push_back(lowercaseAscii(value.at("name").get<std::string>()));
-  }
-}
-
-void collectSearchTexts(const Json& value, std::vector<std::string>& texts) {
-  if (!value.is_array()) {
-    addSearchText(value, texts);
-    return;
-  }
-  for (const Json& element : value) {
-    addSearchText(element, texts);
-  }
-}
-
-std::vector<std::string> searchTextsOf(const TableDescriptor& descriptor, const Json& content) {
-  std::vector<std::string> texts;
-  for (uint32_t ordinal : descriptor.searchable) {
-    const FieldDescriptor* field = descriptor.model->fieldByOrdinal(ordinal);
-    auto value = content.find(field->name);
-    if (value != content.end()) {
-      collectSearchTexts(*value, texts);
-    }
-  }
-  return texts;
-}
-
 // `content` as an app sees it: Files without keys and references as ids.
 IndexedNode indexedNodeOf(const TableDescriptor& descriptor, const Json& content) {
   IndexedNode entry;
   entry.table = descriptor.modelName;
   entry.values = fieldValuesOf(*descriptor.model, content);
-  entry.searchTexts = searchTextsOf(descriptor, content);
+  entry.lists = listValuesOf(*descriptor.model, content);
   for (const ContentReference& reference : collectReferences(*descriptor.model, content)) {
     entry.references.push_back(IndexedReference{reference.fieldOrdinal, reference.rowId});
   }
@@ -114,12 +81,14 @@ bool Client::hasRevokedOwnGrant(const std::string& nodeId) const {
   return false;
 }
 
+// Also makes the table's sorted indexes exist, so that putting the entry places the row in them.
 Result<IndexedNode> Client::indexEntryFor(const Node& node) {
   Result<StoredContent> stored = readStoredContent(node, nullptr);
   if (!stored.ok()) {
     return stored.status();
   }
   const TableDescriptor& table = *stored.value().table;
+  index_.defineIndexes(node.collection, table.modelName, table.indexes);
   Json& content = stored.value().content;
   removeFileKeys(*table.model, content);
   removeReferenceKeys(*table.model, content);

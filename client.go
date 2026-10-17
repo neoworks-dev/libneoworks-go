@@ -270,15 +270,18 @@ func (client *Client) ListNodes(parentID, collection string) ([]NodeSummary, err
 // Query is a Prisma-style filter over the rows of one table. Where holds field
 // filters (a bare value, or the operators equals, not, in, notIn, lt, lte, gt,
 // gte and for text contains, startsWith, endsWith with "mode": "insensitive"),
-// AND, OR and NOT; a reference compares by the ID of its row. OrderBy lists one
-// field and direction ("asc" or "desc") per entry. Take limits the count.
-// Include names single references whose row is read along. File fields cannot
-// be filtered or ordered on.
+// AND, OR and NOT; a reference compares by the ID of its row. A File field
+// takes filters on its members, {"image": {"name": {"contains": "beach"}}} with
+// name, mediaType and size, and a list field some, every and none with a
+// filter on its elements, or has with one plain value. OrderBy lists one field
+// and direction ("asc" or "desc") per entry; a File orders by a member,
+// {"image": {"name": "asc"}}. Take limits the count. Include names single
+// references whose row is read along.
 type Query struct {
-	Where   map[string]any      `json:"where,omitempty"`
-	OrderBy []map[string]string `json:"orderBy,omitempty"`
-	Take    *int                `json:"take,omitempty"`
-	Include map[string]bool     `json:"include,omitempty"`
+	Where   map[string]any   `json:"where,omitempty"`
+	OrderBy []map[string]any `json:"orderBy,omitempty"`
+	Take    *int             `json:"take,omitempty"`
+	Include map[string]bool  `json:"include,omitempty"`
 }
 
 // QueryRow is a matching row. Include holds, for each included reference, the

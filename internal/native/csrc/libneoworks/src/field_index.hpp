@@ -3,8 +3,11 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
+
+#include "descriptor.hpp"
 
 namespace nw {
 
@@ -28,8 +31,18 @@ struct Comparable {
 // Negative, zero or positive as `left` sorts before, equal to or after `right`.
 int compareValues(const Comparable& left, const Comparable& right);
 
-// The set fields of one row by field ordinal. Unset and null fields are absent.
-using FieldValues = std::map<uint32_t, Comparable>;
+// The comparable parts of one value by member: `kWholeValue` for a value compared as a whole, the
+// ordinals of fileModel() for the name, media type and size of a File. Parts that are not set are
+// absent.
+constexpr uint32_t kWholeValue = 0;
+using MemberValues = std::map<uint32_t, Comparable>;
+
+// The set singular fields of one row by field ordinal. Unset and null fields are absent.
+using FieldValues = std::map<uint32_t, MemberValues>;
+
+// The elements of the set list fields of one row by field ordinal, in content order. An unset
+// list is absent.
+using ListValues = std::map<uint32_t, std::vector<MemberValues>>;
 
 struct IndexedReference {
   uint32_t fieldOrdinal = 0;
@@ -40,20 +53,65 @@ struct IndexedNode {
   // The row's table, by model name.
   std::string table;
   FieldValues values;
-  // Lowercased texts of the @neoworks.searchable fields.
-  std::vector<std::string> searchTexts;
+  ListValues lists;
   // The rows its content refers to.
   std::vector<IndexedReference> references;
 };
 
-// The filterable values of every live row this holder can read, per collection. Only values
-// live here, never ciphertext, and nothing is written to disk.
+// Negative, zero or positive as the value sorts before, equal to or after the other; an unset value
+// sorts before every set one.
+int comparePart(const Comparable* left, const Comparable* right);
+
+// A row's place in a sorted index: the values of the index's fields, nullptr for an unset one.
+// They point into the row's IndexedNode, which stays where it is while the row is indexed.
+struct IndexEntry {
+  std::vector<const Comparable*> parts;
+  const std::string* nodeId = nullptr;
+  const IndexedNode* node = nullptr;
+};
+
+// A position between the entries whose leading values differ from `prefix` and those that match it:
+// before all entries starting with `prefix`, or after all of them.
+struct IndexProbe {
+  std::vector<const Comparable*> prefix;
+  bool afterEqual = false;
+};
+
+// Negative when the entry sorts before the probe, positive when after; never zero.
+int compareToProbe(const IndexEntry& entry, const IndexProbe& probe);
+
+struct IndexEntryLess {
+  using is_transparent = void;
+  bool operator()(const IndexEntry& left, const IndexEntry& right) const;
+  bool operator()(const IndexEntry& entry, const IndexProbe& probe) const { return compareToProbe(entry, probe) < 0; }
+  bool operator()(const IndexProbe& probe, const IndexEntry& entry) const { return compareToProbe(entry, probe) > 0; }
+};
+
+// The rows of one table sorted by the values of `fields`, then by id.
+struct SortedIndex {
+  std::vector<uint32_t> fields;
+  std::set<IndexEntry, IndexEntryLess> entries;
+};
+
+// The filterable values of every live row this holder can read, per collection, and the sorted
+// indexes kept over them. Only values live here, never ciphertext, and nothing is written to disk.
 class FieldIndex {
  public:
+  FieldIndex() = default;
+  // Index entries point into the rows, so a copy would point into the original.
+  FieldIndex(const FieldIndex&) = delete;
+  FieldIndex& operator=(const FieldIndex&) = delete;
+
   void put(const std::string& collection, const std::string& nodeId, IndexedNode entry);
   void erase(const std::string& nodeId);
   void eraseCollection(const std::string& collection);
   void clear();
+
+  // Keeps exactly these sorted indexes for the rows of `table`, building the ones not kept yet from
+  // the rows already here.
+  void defineIndexes(const std::string& collection, const std::string& table,
+                     const std::vector<IndexDescriptor>& definitions);
+  const std::vector<SortedIndex>& indexesOf(const std::string& collection, const std::string& table) const;
 
   const IndexedNode* find(const std::string& collection, const std::string& nodeId) const;
   // Id order.
@@ -61,8 +119,13 @@ class FieldIndex {
   bool contains(const std::string& nodeId) const;
 
  private:
+  std::vector<SortedIndex>* indexesFor(const std::string& collection, const std::string& table);
+  void addToIndexes(const std::string& collection, const std::string& nodeId, const IndexedNode& node);
+  void removeFromIndexes(const std::string& collection, const std::string& nodeId, const IndexedNode& node);
+
   std::map<std::string, std::map<std::string, IndexedNode>> collections_;
   std::map<std::string, std::string> collectionOfNode_;
+  std::map<std::string, std::map<std::string, std::vector<SortedIndex>>> indexes_;
 };
 
 }  // namespace nw

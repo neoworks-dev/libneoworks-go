@@ -121,23 +121,23 @@ struct FacetDescriptor {
   std::vector<uint32_t> fields;
 };
 
-struct TimeRangeDescriptor {
-  uint32_t start = 0;
-  uint32_t end = 0;
+// A sorted index over single field values, leading field first. It lives on the device only.
+struct IndexDescriptor {
+  std::vector<uint32_t> fields;
 };
 
-// A model stored as rows. `searchable` and `title` name string or File fields; a File is indexed
-// by its name. `belongsTo` names the single Reference whose row this row's key is wrapped under,
-// and `cascade` the References whose row's deletion deletes this one.
+// A model stored as rows. `title` names a string or File field; a File is titled by its name.
+// `belongsTo` names the single Reference whose row this row's key is wrapped under, and `cascade`
+// the References whose row's deletion deletes this one. `indexes` name single fields that can be
+// filtered, see query_fields.hpp.
 struct TableDescriptor {
   std::string modelName;
   const ModelDescriptor* model = nullptr;
   std::vector<FacetDescriptor> facets;
-  std::vector<uint32_t> searchable;
   std::optional<uint32_t> title;
-  std::optional<TimeRangeDescriptor> timeRange;
   std::optional<uint32_t> belongsTo;
   std::vector<uint32_t> cascade;
+  std::vector<IndexDescriptor> indexes;
 
   const FacetDescriptor* facetOfField(uint32_t ordinal) const;
   const FacetDescriptor* facetByTag(uint32_t tag) const;
@@ -160,6 +160,9 @@ struct SchemaDescriptor {
 // variants: {string: FileVariant}, key: 32 bytes} with the ordinals 1 to 6, and FileVariant
 // {objectId, size}. The key encrypts the file's objects and never leaves the core.
 const ModelDescriptor& fileModel();
+constexpr uint32_t kFileNameOrdinal = 2;
+constexpr uint32_t kFileMediaTypeOrdinal = 3;
+constexpr uint32_t kFileSizeOrdinal = 4;
 
 // The message a reference is: {id: uuid, key: 32 bytes, absent on a @belongsTo field} with the
 // ordinals 1 and 2. The key is the referenced row's key and never leaves the core.

@@ -170,13 +170,6 @@ class Client {
   size_t contentDecryptions() const { return contentDecryptions_; }
 #endif
 
-  // Rows of `table` whose @neoworks.timeRange interval overlaps [rangeStart, rangeEnd), in Unix epoch
-  // milliseconds.
-  std::vector<std::string> queryRange(const std::string& collection, const std::string& table, int64_t rangeStart,
-                                      int64_t rangeEnd);
-  // Rows of `table` whose @neoworks.searchable fields contain `needle`, case-insensitively.
-  std::vector<std::string> search(const std::string& collection, const std::string& table, const std::string& needle);
-
   // Sharing: the owner, or an install holding `<collection>:share` for the owner. Grants and
   // revocations are queued as intents and signed into the access log when sent.
   Result<AccessGrant> shareNode(const ShareRequest& request);

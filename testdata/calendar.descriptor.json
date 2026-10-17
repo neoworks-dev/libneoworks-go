@@ -1219,18 +1219,27 @@
           ]
         }
       ],
-      "searchable": [
-        1,
-        5,
-        10
-      ],
       "title": 1,
-      "timeRange": {
-        "start": 3,
-        "end": 4
-      },
       "belongsTo": 13,
-      "cascade": []
+      "cascade": [],
+      "indexes": [
+        {
+          "fields": [
+            13
+          ]
+        },
+        {
+          "fields": [
+            1
+          ]
+        },
+        {
+          "fields": [
+            13,
+            3
+          ]
+        }
+      ]
     },
     {
       "model": "Calendar",
@@ -1245,11 +1254,10 @@
           ]
         }
       ],
-      "searchable": [],
       "title": 1,
-      "timeRange": null,
       "belongsTo": null,
-      "cascade": []
+      "cascade": [],
+      "indexes": []
     },
     {
       "model": "Photo",
@@ -1262,11 +1270,10 @@
           ]
         }
       ],
-      "searchable": [],
       "title": 1,
-      "timeRange": null,
       "belongsTo": null,
-      "cascade": []
+      "cascade": [],
+      "indexes": []
     },
     {
       "model": "Album",
@@ -1279,11 +1286,10 @@
           ]
         }
       ],
-      "searchable": [],
       "title": 1,
-      "timeRange": null,
       "belongsTo": null,
-      "cascade": []
+      "cascade": [],
+      "indexes": []
     },
     {
       "model": "AlbumPhoto",
@@ -1298,12 +1304,17 @@
           ]
         }
       ],
-      "searchable": [],
       "title": null,
-      "timeRange": null,
       "belongsTo": 1,
       "cascade": [
         2
+      ],
+      "indexes": [
+        {
+          "fields": [
+            1
+          ]
+        }
       ]
     }
   ]

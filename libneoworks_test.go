@@ -176,12 +176,30 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 			"calendar": "00000000-0000-4000-8000-000000000001",
 			"OR":       []any{map[string]any{"notes": nil}, map[string]any{"start": map[string]any{"gte": "2026-10-01T00:00:00Z"}}},
 		},
-		OrderBy: []map[string]string{{"start": "asc"}, {"title": "desc"}},
+		OrderBy: []map[string]any{{"start": "asc"}, {"cover": map[string]any{"name": "desc"}}},
 		Take:    &take,
 		Include: map[string]bool{"calendar": true},
 	})
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("a fresh store matches %v %v", rows, err)
+	}
+
+	rows, err = client.Query(collection, "Event", Query{
+		Where: map[string]any{
+			"cover":     map[string]any{"name": map[string]any{"contains": "beach", "mode": "insensitive"}, "size": map[string]any{"gt": 1000}},
+			"tags":      map[string]any{"some": map[string]any{"startsWith": "t"}, "none": map[string]any{"equals": "x"}},
+			"documents": map[string]any{"every": map[string]any{"mediaType": "application/pdf"}},
+		},
+		OrderBy: []map[string]any{{"cover": map[string]any{"size": "desc"}}},
+	})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("file and list filters on a fresh store: %v %v", rows, err)
+	}
+
+	_, err = client.Query(collection, "Event", Query{Where: map[string]any{"tags": map[string]any{"contains": "x"}}})
+	var listError *ContentError
+	if !errors.As(err, &listError) || listError.Path != "where.tags.contains" {
+		t.Fatalf("list operator that does not fit: got %v", err)
 	}
 
 	_, err = client.Query(collection, "Event", Query{Where: map[string]any{"colour": "blue"}})
@@ -202,7 +220,7 @@ func TestQueryRejectsWhatTheSchemaDoesNotAllow(t *testing.T) {
 const fileDescriptor = `{"descriptorVersion":2,"namespace":"neoworks.photos","enums":[],"models":[{"name":"Photo","fields":[
 {"ordinal":1,"name":"image","container":{"kind":"singular","nullable":false},"value":{"kind":"file"},"required":true,"constraints":{}},
 {"ordinal":2,"name":"attachments","container":{"kind":"repeatedLen"},"value":{"kind":"file"},"required":false,"constraints":{}}]}],
-"tables":[{"model":"Photo","facets":[{"name":"default","tag":1,"fields":[1,2]}],"searchable":[2],"title":1,"timeRange":null,"belongsTo":null,"cascade":[]}]}`
+"tables":[{"model":"Photo","facets":[{"name":"default","tag":1,"fields":[1,2]}],"title":1,"belongsTo":null,"cascade":[],"indexes":[]}]}`
 
 func TestDescriptorsMayDeclareFileFieldsAndRejectOtherFileShapes(t *testing.T) {
 	client := newTestClient(t)
