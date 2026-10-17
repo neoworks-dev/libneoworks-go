@@ -186,6 +186,11 @@ Json reportJson(const SyncReport& report) {
   json["sharingOperationsSent"] = report.sharingOperationsSent;
   json["fullResync"] = report.fullResync;
   json["forbiddenNodeIds"] = report.forbiddenNodeIds;
+  Json outdated = Json::array();
+  for (const auto& [nodeId, requiredVersion] : report.outdatedNodes) {
+    outdated.push_back(Json::object({{"nodeId", nodeId}, {"requiredVersion", requiredVersion}}));
+  }
+  json["outdatedNodes"] = outdated;
   json["integrityFailures"] = report.integrityFailures;
   Json conflicts = Json::array();
   for (const PinConflict& conflict : report.pinConflicts) {

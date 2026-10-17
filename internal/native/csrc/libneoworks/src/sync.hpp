@@ -5,6 +5,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "client.hpp"
@@ -31,6 +32,9 @@ struct SyncReport {
   size_t sharingOperationsSent = 0;
   bool fullResync = false;
   std::vector<std::string> forbiddenNodeIds;
+  // Of the forbidden nodes, those the server refused for a schema version older than their owner
+  // migrated to: node id and the version the app has to update to.
+  std::vector<std::pair<std::string, std::string>> outdatedNodes;
   std::vector<PinConflict> pinConflicts;
   Status failure = Status::Ok;
 };

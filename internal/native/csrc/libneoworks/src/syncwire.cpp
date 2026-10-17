@@ -54,6 +54,13 @@ std::optional<PushResult::Outcome> outcomeFromText(const std::string& status) {
   return std::nullopt;
 }
 
+std::optional<std::string> requiredSchemaVersionOf(const Json& entry) {
+  if (readString(entry, "reason") != std::optional<std::string>("schema_outdated")) {
+    return std::nullopt;
+  }
+  return readString(entry, "requiredVersion");
+}
+
 // The contract leaves the cursor type open: accept an opaque string or a number.
 std::optional<std::string> readCursor(const Json& json) {
   std::optional<std::string> text = readString(json, "cursor");
@@ -138,6 +145,7 @@ Result<std::vector<PushResult>> parsePushResponse(ByteView body) {
     result.id = *id;
     result.outcome = *outcomeFromText(*status);
     result.seq = readUnsigned(entry, "seq").value_or(0);
+    result.requiredSchemaVersion = requiredSchemaVersionOf(entry);
     parsed.push_back(std::move(result));
   }
   return parsed;
