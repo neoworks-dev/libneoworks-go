@@ -31,18 +31,7 @@ void toAppContent(const TableDescriptor& table, Json& content) {
   removeReferenceKeys(*table.model, content);
 }
 
-// A belongsTo given on update must name the row the row already belongs to.
-bool keepsBelongsTo(const TableDescriptor& table, const Json& changes, const Node& node) {
-  if (!table.belongsTo.has_value()) {
-    return true;
-  }
-  const std::string& field = table.model->fieldByOrdinal(*table.belongsTo)->name;
-  if (!changes.contains(field)) {
-    return true;
-  }
-  std::optional<std::string> given = belongsToOf(table, changes);
-  return given.has_value() && node.parentId.has_value() && *given == *node.parentId;
-}
+constexpr int kMaxMoveAncestorSteps = 64;
 
 }  // namespace
 
@@ -333,9 +322,10 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (!table.ok()) {
     return table.status();
   }
-  if (!keepsBelongsTo(*table.value(), request.changes, local->node)) {
-    lastContentError_ = contentError(Status::InvalidArgument, table.value()->modelName, "what a row belongs to does not change");
-    return Status::InvalidArgument;
+  Node node = local->node;
+  Status moved = moveToNewParent(*table.value(), request.changes, nodeKey.value(), node);
+  if (moved != Status::Ok) {
+    return moved;
   }
   Result<Json> keyed = withKeys(*table.value(), request.changes, previous.value());
   if (!keyed.ok()) {
@@ -345,7 +335,6 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (!plaintexts.ok()) {
     return plaintexts.status();
   }
-  Node node = local->node;
   node.baseSeq = node.seq;
   node.updatedAt = nowText();
   Status described = describeContent(*table.value(), plaintexts.value(), node);
@@ -355,6 +344,61 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   stampSchemaVersion(node);
   sealContent(node, nodeKey.value(), plaintexts.value());
   return signAndStore(node);
+}
+
+// A given @belongsTo field that names another row moves `node` below it: the row key stays and is
+// wrapped under the new parent's key. Rows below `node` are not written.
+Status Client::moveToNewParent(const TableDescriptor& table, const Json& changes, const SymmetricKey& nodeKey,
+                               Node& node) {
+  if (!table.belongsTo.has_value() || !changes.contains(table.model->fieldByOrdinal(*table.belongsTo)->name)) {
+    return Status::Ok;
+  }
+  Result<std::string> newParentId = parentOfNewRow(node.collection, table, changes);
+  if (!newParentId.ok()) {
+    return newParentId.status();
+  }
+  if (node.parentId == newParentId.value()) {
+    return Status::Ok;
+  }
+  Status placeable = checkMoveTarget(node, newParentId.value());
+  if (placeable != Status::Ok) {
+    return placeable;
+  }
+  node.parentId = newParentId.take();
+  return attachToParent(node, nodeKey);
+}
+
+Status Client::checkMoveTarget(const Node& node, const std::string& newParentId) {
+  if (roleRank(effectiveRole(*node.parentId)) < roleRank("write")) {
+    return Status::Forbidden;
+  }
+  const Node* newParent = database_->findNode(newParentId);
+  if (newParent == nullptr || newParent->deleted || newParent->collection != node.collection) {
+    return Status::NotFound;
+  }
+  if (newParent->ownerId != node.ownerId) {
+    lastContentError_ = contentError(Status::InvalidArgument, node.collection, "a row moves within the rows of its owner");
+    return Status::InvalidArgument;
+  }
+  if (isSelfOrBelow(*newParent, node.id)) {
+    lastContentError_ = contentError(Status::InvalidArgument, node.collection, "a row cannot move below itself");
+    return Status::InvalidArgument;
+  }
+  return Status::Ok;
+}
+
+bool Client::isSelfOrBelow(const Node& candidate, const std::string& ancestorId) const {
+  const Node* cursor = &candidate;
+  for (int step = 0; step < kMaxMoveAncestorSteps && cursor != nullptr; ++step) {
+    if (cursor->id == ancestorId) {
+      return true;
+    }
+    if (!cursor->parentId.has_value()) {
+      return false;
+    }
+    cursor = database_->findNode(*cursor->parentId);
+  }
+  return false;
 }
 
 Result<std::vector<std::string>> Client::deleteNode(const std::string& nodeId) {
@@ -450,7 +494,6 @@ Status Client::rebaseLocalNode(const std::string& nodeId, const Node& remote) {
     return plaintexts.status();
   }
   Node node = local->node;
-  node.wrappedKey = remote.wrappedKey;
   node.baseSeq = remote.seq;
   node.seq = remote.seq;
   Result<SymmetricKey> nodeKey = keyring_.resolveNodeKey(node, nodeLookup());

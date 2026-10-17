@@ -129,7 +129,12 @@ class Client {
   const CodecError& lastContentError() const { return lastContentError_; }
 
   Result<std::string> createNode(const CreateNodeRequest& request);
-  // A given field replaces the stored value; the @belongsTo field cannot change.
+  // A given field replaces the stored value. Giving the @belongsTo field another row moves the
+  // row below it: the row key, content, files and links stay, the key is wrapped under the new
+  // parent's key, and rows below the moved row are not written. The new parent must be a live row
+  // of the owner and collection of the row, and this holder needs write on the row, on its old
+  // parent and on the new parent. Clearing the field moves the row to this holder's root of the collection.
+  // InvalidArgument: a move below the row itself or to another owner. NotFound: no such parent.
   Status updateNode(const UpdateNodeRequest& request);
   // Deletes the row, the rows belonging to it, and the rows linking to it through an
   // @onDelete("cascade") reference that this holder may write. Returns the ids of the rows it
@@ -298,6 +303,11 @@ class Client {
   Status deleteCascadingLinkers(const std::string& targetId, DeletionPass& pass);
   // Whether `linker` refers to `targetId` through a reference marked @onDelete("cascade").
   bool cascadesFrom(const Node& linker, const std::string& targetId);
+  // Places `node` under the row `changes` gives for the @belongsTo field (this holder's root when
+  // it is cleared), when that is not its parent yet, and wraps `nodeKey` under the new parent.
+  Status moveToNewParent(const TableDescriptor& table, const Json& changes, const SymmetricKey& nodeKey, Node& node);
+  Status checkMoveTarget(const Node& node, const std::string& newParentId);
+  bool isSelfOrBelow(const Node& candidate, const std::string& ancestorId) const;
   Status signAndStore(Node& node);
   Status attachToParent(Node& node, const SymmetricKey& nodeKey);
   Status createOwnerGrant(const Node& root, const SymmetricKey& nodeKey);

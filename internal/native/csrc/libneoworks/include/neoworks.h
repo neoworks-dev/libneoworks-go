@@ -244,7 +244,13 @@ NW_API int nw_client_create_node(nw_client* client, const char* request_json, nw
 /* request: {"nodeId": id, "changes": {...}}. A field in changes replaces the stored value, null
  * clears it, and fields not given keep their value. The row's file list and links follow its File
  * values and references. A File value with an object id the row holds keeps that file's key; any
- * other gets a new one. The @belongsTo field cannot change. */
+ * other gets a new one. Giving the @belongsTo field another row moves the row below it: the row
+ * keeps its key, content, files and links, the key is wrapped under the new parent's key, and the
+ * rows below it are not written. The new parent must be a live row of the same owner and
+ * collection, and this client needs write on the row, its old parent and the new parent. Clearing the field moves the row
+ * to this client's root of the collection. NW_ERR_INVALID_ARGUMENT: a move
+ * below the row itself or to a row of another owner. NW_ERR_NOT_FOUND: no such parent.
+ * NW_ERR_FORBIDDEN: no write on the new parent. */
 NW_API int nw_client_update_node(nw_client* client, const char* request_json);
 /* Deletes the row, every row belonging to it, and every row linking to it through an
  * @onDelete("cascade") reference that this client may write. Writes the ids of the rows it
