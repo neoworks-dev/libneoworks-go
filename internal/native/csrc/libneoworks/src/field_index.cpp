@@ -133,16 +133,53 @@ bool IndexEntryLess::operator()(const IndexEntry& left, const IndexEntry& right)
 
 namespace {
 
+// The message that holds the last step of `path`; nullptr when a message on the way is unset.
+const IndexedMessage* parentOf(const IndexedMessage& root, const OrdinalPath& path) {
+  const IndexedMessage* message = &root;
+  for (size_t step = 0; step + 1 < path.size(); ++step) {
+    auto found = message->messages.find(path[step]);
+    if (found == message->messages.end()) {
+      return nullptr;
+    }
+    message = &found->second;
+  }
+  return message;
+}
+
+}  // namespace
+
+const Comparable* findValue(const IndexedMessage& root, const OrdinalPath& path) {
+  const IndexedMessage* parent = parentOf(root, path);
+  if (parent == nullptr) {
+    return nullptr;
+  }
+  auto found = parent->values.find(path.back());
+  if (found == parent->values.end()) {
+    return nullptr;
+  }
+  return &found->second;
+}
+
+const std::vector<IndexedMessage>* findElements(const IndexedMessage& root, const OrdinalPath& path) {
+  const IndexedMessage* parent = parentOf(root, path);
+  if (parent == nullptr) {
+    return nullptr;
+  }
+  auto found = parent->lists.find(path.back());
+  if (found == parent->lists.end()) {
+    return nullptr;
+  }
+  return &found->second;
+}
+
+namespace {
+
 const Comparable* wholeValueOf(const IndexedNode& node, uint32_t ordinal) {
-  auto field = node.values.find(ordinal);
-  if (field == node.values.end()) {
+  auto field = node.fields.values.find(ordinal);
+  if (field == node.fields.values.end()) {
     return nullptr;
   }
-  auto whole = field->second.find(kWholeValue);
-  if (whole == field->second.end()) {
-    return nullptr;
-  }
-  return &whole->second;
+  return &field->second;
 }
 
 IndexEntry entryOf(const SortedIndex& index, const std::string& nodeId, const IndexedNode& node) {

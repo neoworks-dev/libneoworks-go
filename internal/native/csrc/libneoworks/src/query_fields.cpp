@@ -205,6 +205,10 @@ bool isList(const FieldDescriptor& field) {
          kind == ContainerKind::WrapperRepeated;
 }
 
+bool isMap(const FieldDescriptor& field) {
+  return field.container.kind == ContainerKind::Map || field.container.kind == ContainerKind::WrapperMap;
+}
+
 bool isFile(const FieldDescriptor& field) { return field.value.kind == ValueKind::File; }
 
 bool isMessage(const FieldDescriptor& field) {
@@ -247,10 +251,15 @@ std::optional<Comparable> toComparable(const Json& value, const FieldDescriptor&
 
 namespace {
 
-MemberValues fileMembersOf(const Json& file) {
-  MemberValues members;
+// Content nested deeper than this is not indexed.
+constexpr size_t kMaxIndexedDepth = 32;
+
+IndexedMessage messageOf(const ModelDescriptor& model, const Json& content, size_t depth);
+
+IndexedMessage fileMessageOf(const Json& file) {
+  IndexedMessage message;
   if (!file.is_object()) {
-    return members;
+    return message;
   }
   for (const FieldDescriptor& member : fileModel().fields) {
     auto value = file.find(member.name);
@@ -259,88 +268,89 @@ MemberValues fileMembersOf(const Json& file) {
     }
     std::optional<Comparable> comparable = toComparable(*value, member, *filterableType(member));
     if (comparable.has_value()) {
-      members.emplace(member.ordinal, std::move(*comparable));
+      message.values.emplace(member.ordinal, std::move(*comparable));
     }
   }
-  return members;
+  return message;
 }
 
-MemberValues messageMembersOf(const ModelDescriptor& model, const Json& message) {
-  MemberValues members;
-  if (!message.is_object()) {
-    return members;
+IndexedMessage plainValueMessageOf(const FieldDescriptor& field, const Json& value) {
+  IndexedMessage message;
+  std::optional<Comparable> comparable = toComparable(value, field, *valueType(field));
+  if (comparable.has_value()) {
+    message.values.emplace(kWholeValue, std::move(*comparable));
   }
-  for (const FieldDescriptor& member : model.fields) {
-    auto value = message.find(member.name);
-    std::optional<FieldType> type = filterableType(member);
-    if (!type.has_value() || value == message.end() || value->is_null()) {
-      continue;
-    }
-    std::optional<Comparable> comparable = toComparable(*value, member, *type);
-    if (comparable.has_value()) {
-      members.emplace(member.ordinal, std::move(*comparable));
-    }
-  }
-  return members;
+  return message;
 }
 
-MemberValues memberValuesOf(const FieldDescriptor& field, const Json& value) {
+bool isNested(const FieldDescriptor& field) { return isFile(field) || isMessage(field); }
+
+bool isIndexed(const FieldDescriptor& field) { return isNested(field) || valueType(field).has_value(); }
+
+// What one File, message or plain value of `field` becomes.
+IndexedMessage elementMessageOf(const FieldDescriptor& field, const Json& value, size_t depth) {
   if (isFile(field)) {
-    return fileMembersOf(value);
+    return fileMessageOf(value);
   }
   if (isMessage(field)) {
-    return messageMembersOf(*field.value.model, value);
+    return messageOf(*field.value.model, value, depth + 1);
   }
-  MemberValues members;
-  std::optional<FieldType> type = valueType(field);
-  if (!type.has_value()) {
-    return members;
-  }
-  std::optional<Comparable> comparable = toComparable(value, field, *type);
-  if (comparable.has_value()) {
-    members.emplace(kWholeValue, std::move(*comparable));
-  }
-  return members;
+  return plainValueMessageOf(field, value);
 }
 
-bool isIndexed(const FieldDescriptor& field) { return isFile(field) || valueType(field).has_value(); }
+void addSingular(const FieldDescriptor& field, const Json& value, size_t depth, IndexedMessage& into) {
+  if (isNested(field)) {
+    IndexedMessage nested = elementMessageOf(field, value, depth);
+    if (!nested.empty()) {
+      into.messages.emplace(field.ordinal, std::move(nested));
+    }
+    return;
+  }
+  std::optional<Comparable> comparable = toComparable(value, field, *valueType(field));
+  if (comparable.has_value()) {
+    into.values.emplace(field.ordinal, std::move(*comparable));
+  }
+}
 
-bool isIndexedList(const FieldDescriptor& field) { return isList(field) && (isIndexed(field) || isMessage(field)); }
+// The elements of a list, or the values of a map, which JSON writes as an array or an object.
+void addCollection(const FieldDescriptor& field, const Json& value, size_t depth, IndexedMessage& into) {
+  if (!value.is_array() && !value.is_object()) {
+    return;
+  }
+  std::vector<IndexedMessage> elements;
+  for (const Json& element : value) {
+    if (!element.is_null()) {
+      elements.push_back(elementMessageOf(field, element, depth));
+    }
+  }
+  if (!elements.empty()) {
+    into.lists.emplace(field.ordinal, std::move(elements));
+  }
+}
+
+IndexedMessage messageOf(const ModelDescriptor& model, const Json& content, size_t depth) {
+  IndexedMessage message;
+  if (!content.is_object() || depth > kMaxIndexedDepth) {
+    return message;
+  }
+  for (const FieldDescriptor& field : model.fields) {
+    auto value = content.find(field.name);
+    if (value == content.end() || value->is_null() || !isIndexed(field)) {
+      continue;
+    }
+    if (field.container.kind == ContainerKind::Singular) {
+      addSingular(field, *value, depth, message);
+    } else {
+      addCollection(field, *value, depth, message);
+    }
+  }
+  return message;
+}
 
 }  // namespace
 
-FieldValues fieldValuesOf(const ModelDescriptor& model, const Json& content) {
-  FieldValues values;
-  for (const FieldDescriptor& field : model.fields) {
-    auto value = content.find(field.name);
-    bool present = value != content.end() && !value->is_null();
-    if (field.container.kind != ContainerKind::Singular || !isIndexed(field) || !present) {
-      continue;
-    }
-    MemberValues members = memberValuesOf(field, *value);
-    if (!members.empty()) {
-      values.emplace(field.ordinal, std::move(members));
-    }
-  }
-  return values;
-}
-
-ListValues listValuesOf(const ModelDescriptor& model, const Json& content) {
-  ListValues lists;
-  for (const FieldDescriptor& field : model.fields) {
-    auto value = content.find(field.name);
-    bool present = value != content.end() && value->is_array();
-    if (!isIndexedList(field) || !present) {
-      continue;
-    }
-    std::vector<MemberValues>& elements = lists[field.ordinal];
-    for (const Json& element : *value) {
-      if (!element.is_null()) {
-        elements.push_back(memberValuesOf(field, element));
-      }
-    }
-  }
-  return lists;
+IndexedMessage indexedMessageOf(const ModelDescriptor& model, const Json& content) {
+  return messageOf(model, content, 0);
 }
 
 }  // namespace nw

@@ -22,13 +22,17 @@ std::optional<FieldType> valueType(const FieldDescriptor& field);
 // How a singular field is compared as a whole; nullopt for a list, map or File.
 std::optional<FieldType> filterableType(const FieldDescriptor& field);
 
-// A repeated field of values, which `some`, `every`, `none` and `has` filter. Maps are not lists.
+// A repeated field, which `some`, `every`, `none` and `has` filter over its elements.
 bool isList(const FieldDescriptor& field);
+
+// A map field, whose values `some`, `every`, `none` and `has` filter as a list's elements; its keys
+// are not filterable.
+bool isMap(const FieldDescriptor& field);
 
 bool isFile(const FieldDescriptor& field);
 
-// A field whose value is a message of the schema; the elements of a list of them are filtered by
-// the message's singular fields that have a value type.
+// A field whose value is a message of the schema; a filter reaches the fields of the message, of its
+// embedded messages and of its lists and maps.
 bool isMessage(const FieldDescriptor& field);
 
 // The members of a File that can be filtered and ordered: name, mediaType and size.
@@ -43,10 +47,8 @@ bool isOrdered(FieldType type);
 // JSON does not fit the field.
 std::optional<Comparable> toComparable(const Json& value, const FieldDescriptor& field, FieldType type);
 
-// The set singular fields of a decoded content object of `model` that can be filtered.
-FieldValues fieldValuesOf(const ModelDescriptor& model, const Json& content);
-
-// The set list fields of a decoded content object of `model` that can be filtered.
-ListValues listValuesOf(const ModelDescriptor& model, const Json& content);
+// The filterable values of a decoded content object of `model`, at any depth of embedded messages,
+// lists and maps.
+IndexedMessage indexedMessageOf(const ModelDescriptor& model, const Json& content);
 
 }  // namespace nw

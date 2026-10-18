@@ -9,19 +9,20 @@
 #include "schema_codec.hpp"
 
 // Prisma-style filters over the indexed rows of one table: `{ where, orderBy, take, include }`. A
-// File field is filtered and ordered by its members, `{ image: { name: { contains: "x" } } }`, and
-// a list field by `some`, `every`, `none` and `has`; the elements of a list of Files or messages are
-// filtered by their members, `{ emails: { some: { value: { contains: "x" } } } }`. A query is validated against the table once
-// and then evaluated on indexed values without any decryption.
+// filter follows singular embedded messages and Files by their fields, `{ card: { name: { full:
+// { contains: "x" } } } }`, and orderBy follows them the same way. A list or map is filtered by
+// `some`, `every`, `none` and, for plain values, `has`; the elements of a list and the values of a
+// map that are messages or Files are filtered by their fields, `{ emails: { some: { address:
+// { contains: "x" } } } }`, and those fields may again be messages, lists and maps. A query is
+// validated against the table once and then evaluated on indexed values without any decryption.
 namespace nw {
 
 enum class FilterOperator { Equals, Not, In, NotIn, Lt, Lte, Gt, Gte, Contains, StartsWith, EndsWith };
 
-// One operator on one field, or on one member of a File field. Inside a list quantifier the test
-// looks at the element and `ordinal` is ignored. A null operand is nullopt.
+// One operator on one value. `path` leads to the value from the row, or from the list element the
+// test is made inside of; a plain list element is tested at `kWholeValue`. A null operand is nullopt.
 struct FieldTest {
-  uint32_t ordinal = 0;
-  uint32_t member = kWholeValue;
+  OrdinalPath path;
   FilterOperator filterOperator = FilterOperator::Equals;
   std::vector<std::optional<Comparable>> operands;
   bool insensitive = false;
@@ -39,20 +40,20 @@ struct Condition {
     // The single child does not match.
     Not,
     Field,
-    // The single child, tested against each element of the list field `listOrdinal`; an unset
-    // list has no elements.
+    // The single child, tested against each element of the list or map that `listPath` leads to;
+    // an unset list has no elements.
     Elements,
   };
   Type type = Type::All;
   std::vector<Condition> children;
   FieldTest test;
   Quantifier quantifier = Quantifier::Some;
-  uint32_t listOrdinal = 0;
+  OrdinalPath listPath;
 };
 
+// Rows are ordered by the value `path` leads to from the row; an unset value sorts before any set one.
 struct OrderKey {
-  uint32_t ordinal = 0;
-  uint32_t member = kWholeValue;
+  OrdinalPath path;
   bool descending = false;
 };
 

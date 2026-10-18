@@ -11,8 +11,7 @@ namespace {
 IndexedNode indexedNodeOf(const TableDescriptor& descriptor, const Json& content) {
   IndexedNode entry;
   entry.table = descriptor.modelName;
-  entry.values = fieldValuesOf(*descriptor.model, content);
-  entry.lists = listValuesOf(*descriptor.model, content);
+  entry.fields = indexedMessageOf(*descriptor.model, content);
   for (const ContentReference& reference : collectReferences(*descriptor.model, content)) {
     entry.references.push_back(IndexedReference{reference.fieldOrdinal, reference.rowId});
   }

@@ -31,18 +31,34 @@ struct Comparable {
 // Negative, zero or positive as `left` sorts before, equal to or after `right`.
 int compareValues(const Comparable& left, const Comparable& right);
 
-// The comparable parts of one value by member: `kWholeValue` for a value compared as a whole, the
-// ordinals of fileModel() for the name, media type and size of a File. Parts that are not set are
-// absent.
+// The ordinals of the fields that lead from a row, or from a list element, down to a value. Every
+// step but the last names a singular embedded message or File; the last names the value, or the list
+// field when the path leads to the elements of a list.
+using OrdinalPath = std::vector<uint32_t>;
+
+// Where the value of a list element that is a plain value, not a message, is kept.
 constexpr uint32_t kWholeValue = 0;
-using MemberValues = std::map<uint32_t, Comparable>;
 
-// The set singular fields of one row by field ordinal. Unset and null fields are absent.
-using FieldValues = std::map<uint32_t, MemberValues>;
+// The comparable values of one message: a row's content, an embedded message, a File or one
+// element of a list or map. Unset and null fields are absent.
+struct IndexedMessage {
+  // The set singular fields that have a value type by ordinal; for a File the name, media type and
+  // size by the ordinals of fileModel().
+  std::map<uint32_t, Comparable> values;
+  // The singular embedded messages and Files that have anything indexed.
+  std::map<uint32_t, IndexedMessage> messages;
+  // The elements of the set lists and the values of the set maps by field ordinal, in content order.
+  // An element that is a plain value keeps it at `kWholeValue`.
+  std::map<uint32_t, std::vector<IndexedMessage>> lists;
 
-// The elements of the set list fields of one row by field ordinal, in content order. An unset
-// list is absent.
-using ListValues = std::map<uint32_t, std::vector<MemberValues>>;
+  bool empty() const { return values.empty() && messages.empty() && lists.empty(); }
+};
+
+// The value `path` leads to; nullptr when it or a message on the way is unset.
+const Comparable* findValue(const IndexedMessage& root, const OrdinalPath& path);
+
+// The elements of the list `path` leads to; nullptr when it or a message on the way is unset.
+const std::vector<IndexedMessage>* findElements(const IndexedMessage& root, const OrdinalPath& path);
 
 struct IndexedReference {
   uint32_t fieldOrdinal = 0;
@@ -52,8 +68,7 @@ struct IndexedReference {
 struct IndexedNode {
   // The row's table, by model name.
   std::string table;
-  FieldValues values;
-  ListValues lists;
+  IndexedMessage fields;
   // The rows its content refers to.
   std::vector<IndexedReference> references;
 };

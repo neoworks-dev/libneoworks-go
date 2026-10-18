@@ -7,15 +7,13 @@ namespace nw {
 
 namespace {
 
-// The entries a filter object names: the fields of the queried model, or the members of one of its
-// File fields or the fields of a message element of one of its list fields.
+// The entries a filter object names: the fields of `model`, which sits at `path` below the row or
+// below the list element the filter is made inside of.
 struct Scope {
   const ModelDescriptor* model = nullptr;
-  bool inMembers = false;
-  // The field whose members `model` lists.
-  uint32_t memberOwnerOrdinal = 0;
+  OrdinalPath path;
 
-  bool inFile() const { return inMembers && model == &fileModel(); }
+  bool inFile() const { return model == &fileModel(); }
 };
 
 struct Context {
@@ -24,15 +22,27 @@ struct Context {
   Scope scope;
 };
 
-Context fileContext(const Context& context, const FieldDescriptor& field) {
+OrdinalPath pathTo(const Context& context, const FieldDescriptor& field) {
+  OrdinalPath path = context.scope.path;
+  path.push_back(field.ordinal);
+  return path;
+}
+
+// The fields of a singular File or message `field`, below the current scope.
+Context nestedContext(const Context& context, const FieldDescriptor& field) {
   Context inner = context;
-  inner.scope = Scope{&fileModel(), true, field.ordinal};
+  inner.scope.path = pathTo(context, field);
+  inner.scope.model = field.value.model;
+  if (isFile(field)) {
+    inner.scope.model = &fileModel();
+  }
   return inner;
 }
 
-Context messageContext(const Context& context, const FieldDescriptor& list) {
-  Context inner = context;
-  inner.scope = Scope{list.value.model, true, list.ordinal};
+// The fields of one element of the list or map `field`, which are tested on their own.
+Context elementContext(const Context& context, const FieldDescriptor& field) {
+  Context inner = nestedContext(context, field);
+  inner.scope.path.clear();
   return inner;
 }
 
@@ -53,11 +63,11 @@ Condition conjunction(std::vector<Condition> children) {
   return condition;
 }
 
-Condition elementsOf(Quantifier quantifier, const FieldDescriptor& list, Condition element) {
+Condition elementsOf(Quantifier quantifier, OrdinalPath listPath, Condition element) {
   Condition condition;
   condition.type = Condition::Type::Elements;
   condition.quantifier = quantifier;
-  condition.listOrdinal = list.ordinal;
+  condition.listPath = std::move(listPath);
   condition.children.push_back(std::move(element));
   return condition;
 }
@@ -121,8 +131,7 @@ Result<std::optional<Comparable>> compileOperand(const Context& context, const F
 struct FieldFilter {
   const FieldDescriptor* field = nullptr;
   FieldType type = FieldType::Text;
-  uint32_t ordinal = 0;
-  uint32_t member = kWholeValue;
+  OrdinalPath path;
   bool insensitive = false;
   // Only equals, not, in and notIn apply.
   bool equalityOnly = false;
@@ -195,8 +204,7 @@ Result<Condition> compileOperator(const Context& context, const FieldFilter& fil
   }
   Condition condition;
   condition.type = Condition::Type::Field;
-  condition.test.ordinal = filter.ordinal;
-  condition.test.member = filter.member;
+  condition.test.path = filter.path;
   condition.test.filterOperator = filterOperator;
   condition.test.operands = operands.take();
   condition.test.insensitive = filter.insensitive;
@@ -258,19 +266,22 @@ FieldFilter filterOf(const Context& context, const FieldDescriptor& field, Field
   FieldFilter filter;
   filter.field = &field;
   filter.type = type;
-  filter.ordinal = field.ordinal;
-  if (context.scope.inMembers) {
-    filter.ordinal = context.scope.memberOwnerOrdinal;
-    filter.member = field.ordinal;
-  }
+  filter.path = pathTo(context, field);
+  return filter;
+}
+
+FieldFilter plainElementFilterOf(const FieldDescriptor& field, FieldType type) {
+  FieldFilter filter;
+  filter.field = &field;
+  filter.type = type;
+  filter.path = OrdinalPath{kWholeValue};
   return filter;
 }
 
 Result<Condition> compileValueField(const Context& context, const FieldDescriptor& field, const Json& value,
                                     const std::string& path) {
   std::optional<FieldType> type = filterableType(field);
-  bool memberAllowed = !context.scope.inFile() || isFilterableFileMember(field);
-  if (!type.has_value() || !memberAllowed) {
+  if (!type.has_value()) {
     return fail(context, path, "field " + field.name + " cannot be filtered");
   }
   return compileFieldFilter(context, filterOf(context, field, *type), value, path);
@@ -278,32 +289,24 @@ Result<Condition> compileValueField(const Context& context, const FieldDescripto
 
 Result<Condition> compileWhere(const Context& context, const Json& json, const std::string& path);
 
-Result<Condition> compileFileField(const Context& context, const FieldDescriptor& field, const Json& value,
-                                   const std::string& path) {
-  if (!value.is_object()) {
-    return fail(context, path, "expects an object of name, mediaType and size filters");
+// A File or message, or an element that is one, is filtered by an object on its fields.
+Result<Condition> compileObjectFilter(const Context& inner, const Json& value, const std::string& path) {
+  if (value.is_object()) {
+    return compileWhere(inner, value, path);
   }
-  return compileWhere(fileContext(context, field), value, path);
+  if (inner.scope.inFile()) {
+    return fail(inner, path, "expects an object of name, mediaType and size filters");
+  }
+  return fail(inner, path, "expects an object of filters on the fields of " + inner.scope.model->name);
 }
 
-Result<Condition> compileMessageElement(const Context& context, const FieldDescriptor& list, const Json& value,
-                                        const std::string& path) {
-  if (!value.is_object()) {
-    return fail(context, path, "expects an object of filters on the fields of " + list.value.model->name);
-  }
-  return compileWhere(messageContext(context, list), value, path);
-}
-
-// The condition one element of the list `field` has to meet.
+// The condition one element of the list or map `field` has to meet.
 Result<Condition> compileElement(const Context& context, const FieldDescriptor& field, const Json& value,
                                  const std::string& path) {
-  if (isFile(field)) {
-    return compileFileField(context, field, value, path);
+  if (isFile(field) || isMessage(field)) {
+    return compileObjectFilter(elementContext(context, field), value, path);
   }
-  if (isMessage(field)) {
-    return compileMessageElement(context, field, value, path);
-  }
-  return compileFieldFilter(context, filterOf(context, field, *valueType(field)), value, path);
+  return compileFieldFilter(context, plainElementFilterOf(field, *valueType(field)), value, path);
 }
 
 Result<Condition> compileHas(const Context& context, const FieldDescriptor& field, const Json& value,
@@ -312,11 +315,11 @@ Result<Condition> compileHas(const Context& context, const FieldDescriptor& fiel
     return fail(context, path, "has applies to lists of plain values, use some with a filter on the members");
   }
   Result<Condition> equals =
-      compileOperator(context, filterOf(context, field, *valueType(field)), "equals", value, path);
+      compileOperator(context, plainElementFilterOf(field, *valueType(field)), "equals", value, path);
   if (!equals.ok()) {
     return equals;
   }
-  return elementsOf(Quantifier::Some, field, equals.take());
+  return elementsOf(Quantifier::Some, pathTo(context, field), equals.take());
 }
 
 const std::map<std::string, Quantifier>& quantifierNames() {
@@ -338,7 +341,7 @@ Result<Condition> compileListOperator(const Context& context, const FieldDescrip
   if (!element.ok()) {
     return element;
   }
-  return elementsOf(quantifier->second, field, element.take());
+  return elementsOf(quantifier->second, pathTo(context, field), element.take());
 }
 
 Result<Condition> compileListField(const Context& context, const FieldDescriptor& field, const Json& value,
@@ -366,14 +369,14 @@ Result<Condition> compileField(const Context& context, const std::string& name, 
   if (field == nullptr) {
     return fail(context, path, "unknown field " + name + " on " + context.scope.model->name);
   }
-  if (context.scope.inMembers && (isFile(*field) || isList(*field))) {
+  if (context.scope.inFile() && !isFilterableFileMember(*field)) {
     return fail(context, path, "field " + name + " cannot be filtered");
   }
-  if (isFile(*field) && field->container.kind == ContainerKind::Singular) {
-    return compileFileField(context, *field, value, path);
-  }
-  if (isList(*field)) {
+  if (isList(*field) || isMap(*field)) {
     return compileListField(context, *field, value, path);
+  }
+  if (isFile(*field) || isMessage(*field)) {
+    return compileObjectFilter(nestedContext(context, *field), value, path);
   }
   return compileValueField(context, *field, value, path);
 }
@@ -454,6 +457,15 @@ Result<bool> compileDirection(const Context& context, const Json& direction, con
   return direction == "desc";
 }
 
+Status compileOrderKeys(const Context& context, const Json& entry, const std::string& path, std::vector<OrderKey>& keys);
+
+OrderKey orderKeyOf(OrdinalPath keyPath, bool descending) {
+  OrderKey key;
+  key.path = std::move(keyPath);
+  key.descending = descending;
+  return key;
+}
+
 Status compileMemberOrder(const Context& context, const FieldDescriptor& field, const Json& members,
                           const std::string& path, std::vector<OrderKey>& keys) {
   if (!members.is_object()) {
@@ -469,7 +481,9 @@ Status compileMemberOrder(const Context& context, const FieldDescriptor& field, 
     if (!descending.ok()) {
       return descending.status();
     }
-    keys.push_back(OrderKey{field.ordinal, member->ordinal, descending.value()});
+    OrdinalPath memberKeyPath = pathTo(context, field);
+    memberKeyPath.push_back(member->ordinal);
+    keys.push_back(orderKeyOf(std::move(memberKeyPath), descending.value()));
   }
   return Status::Ok;
 }
@@ -483,14 +497,21 @@ Status compileValueOrder(const Context& context, const FieldDescriptor& field, c
   if (!descending.ok()) {
     return descending.status();
   }
-  keys.push_back(OrderKey{field.ordinal, kWholeValue, descending.value()});
+  keys.push_back(orderKeyOf(pathTo(context, field), descending.value()));
   return Status::Ok;
+}
+
+bool isSingularMessage(const FieldDescriptor& field) {
+  return isMessage(field) && field.container.kind == ContainerKind::Singular;
 }
 
 Status compileOrderKey(const Context& context, const FieldDescriptor& field, const Json& direction,
                        const std::string& path, std::vector<OrderKey>& keys) {
   if (isFile(field) && field.container.kind == ContainerKind::Singular) {
     return compileMemberOrder(context, field, direction, path, keys);
+  }
+  if (isSingularMessage(field)) {
+    return compileOrderKeys(nestedContext(context, field), direction, path, keys);
   }
   return compileValueOrder(context, field, direction, path, keys);
 }
@@ -501,9 +522,9 @@ Status compileOrderKeys(const Context& context, const Json& entry, const std::st
   }
   for (const auto& [name, direction] : entry.items()) {
     std::string keyPath = path + "." + name;
-    const FieldDescriptor* field = context.model->fieldByName(name);
+    const FieldDescriptor* field = context.scope.model->fieldByName(name);
     if (field == nullptr) {
-      return fail(context, keyPath, "unknown field " + name + " on " + context.model->name);
+      return fail(context, keyPath, "unknown field " + name + " on " + context.scope.model->name);
     }
     Status compiled = compileOrderKey(context, *field, direction, keyPath, keys);
     if (compiled != Status::Ok) {

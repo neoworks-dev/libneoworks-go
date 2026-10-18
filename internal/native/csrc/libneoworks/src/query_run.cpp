@@ -141,36 +141,7 @@ Truth testTruth(const FieldTest& test, const Comparable* value) {
   return truthOf(matchesPresentValue(test, *value));
 }
 
-// Where a test looks: the row's own fields, or one element of a list field.
-struct Scope {
-  const IndexedNode& node;
-  const MemberValues* element = nullptr;
-};
-
-const Comparable* memberOf(const MemberValues& members, uint32_t member) {
-  auto found = members.find(member);
-  if (found == members.end()) {
-    return nullptr;
-  }
-  return &found->second;
-}
-
-const Comparable* valueOf(const IndexedNode& node, uint32_t ordinal, uint32_t member) {
-  auto field = node.values.find(ordinal);
-  if (field == node.values.end()) {
-    return nullptr;
-  }
-  return memberOf(field->second, member);
-}
-
-const Comparable* valueOf(const Scope& scope, const FieldTest& test) {
-  if (scope.element != nullptr) {
-    return memberOf(*scope.element, test.member);
-  }
-  return valueOf(scope.node, test.ordinal, test.member);
-}
-
-Truth conditionTruth(const Condition& condition, const Scope& scope);
+Truth conditionTruth(const Condition& condition, const IndexedMessage& scope);
 
 // True when every item is, false as soon as one is, otherwise unknown. No items is true.
 template <typename Items, typename Evaluate>
@@ -204,41 +175,40 @@ Truth anyOf(const Items& items, Evaluate evaluate) {
   return combined;
 }
 
-const std::vector<MemberValues>& elementsOf(const IndexedNode& node, uint32_t listOrdinal) {
-  static const std::vector<MemberValues> none;
-  auto found = node.lists.find(listOrdinal);
-  if (found == node.lists.end()) {
+const std::vector<IndexedMessage>& elementsOf(const IndexedMessage& scope, const OrdinalPath& listPath) {
+  static const std::vector<IndexedMessage> none;
+  const std::vector<IndexedMessage>* elements = findElements(scope, listPath);
+  if (elements == nullptr) {
     return none;
   }
-  return found->second;
+  return *elements;
 }
 
 // Whether some element has the given truth under the child condition.
-bool someElementIs(const std::vector<MemberValues>& elements, const IndexedNode& node, const Condition& child,
-                   Truth wanted) {
-  return std::any_of(elements.begin(), elements.end(), [&](const MemberValues& element) {
-    Truth truth = conditionTruth(child, Scope{node, &element});
-    return truth == wanted;
+bool someElementIs(const std::vector<IndexedMessage>& elements, const Condition& child, Truth wanted) {
+  return std::any_of(elements.begin(), elements.end(), [&](const IndexedMessage& element) {
+    return conditionTruth(child, element) == wanted;
   });
 }
 
 // As in Prisma, a quantifier is a plain yes or no: an element for which the filter is unknown is neither
 // a match nor a violation. `every` holds unless an element fails the filter, so an element without the
 // field passes `every: { note: "x" }`; test `{ note: { not: null } }` to demand the field.
-Truth elementsTruth(const Condition& condition, const IndexedNode& node) {
-  const std::vector<MemberValues>& elements = elementsOf(node, condition.listOrdinal);
+Truth elementsTruth(const Condition& condition, const IndexedMessage& scope) {
+  const std::vector<IndexedMessage>& elements = elementsOf(scope, condition.listPath);
   const Condition& child = condition.children.front();
   if (condition.quantifier == Quantifier::Every) {
-    return truthOf(!someElementIs(elements, node, child, Truth::False));
+    return truthOf(!someElementIs(elements, child, Truth::False));
   }
-  bool matches = someElementIs(elements, node, child, Truth::True);
+  bool matches = someElementIs(elements, child, Truth::True);
   if (condition.quantifier == Quantifier::Some) {
     return truthOf(matches);
   }
   return truthOf(!matches);
 }
 
-Truth conditionTruth(const Condition& condition, const Scope& scope) {
+// `scope` is the row's content, or the list element the condition is tested inside of.
+Truth conditionTruth(const Condition& condition, const IndexedMessage& scope) {
   switch (condition.type) {
     case Condition::Type::All:
       return allOf(condition.children, [&](const Condition& child) { return conditionTruth(child, scope); });
@@ -247,17 +217,17 @@ Truth conditionTruth(const Condition& condition, const Scope& scope) {
     case Condition::Type::Not:
       return negated(conditionTruth(condition.children.front(), scope));
     case Condition::Type::Field:
-      return testTruth(condition.test, valueOf(scope, condition.test));
+      return testTruth(condition.test, findValue(scope, condition.test.path));
     case Condition::Type::Elements:
-      return elementsTruth(condition, scope.node);
+      return elementsTruth(condition, scope);
   }
   return Truth::False;
 }
 
 // A missing value sorts before any present one.
 int compareForOrder(const IndexedNode& left, const IndexedNode& right, const OrderKey& key) {
-  const Comparable* leftValue = valueOf(left, key.ordinal, key.member);
-  const Comparable* rightValue = valueOf(right, key.ordinal, key.member);
+  const Comparable* leftValue = findValue(left.fields, key.path);
+  const Comparable* rightValue = findValue(right.fields, key.path);
   if (leftValue == nullptr || rightValue == nullptr) {
     return static_cast<int>(leftValue != nullptr) - static_cast<int>(rightValue != nullptr);
   }
@@ -300,7 +270,7 @@ std::vector<std::pair<std::string, std::optional<std::string>>> includedRows(con
 using Hit = std::pair<const std::string*, const IndexedNode*>;
 
 bool matches(const Query& query, const IndexedNode& node) {
-  return conditionTruth(query.where, Scope{node}) == Truth::True;
+  return conditionTruth(query.where, node.fields) == Truth::True;
 }
 
 bool sortsByIdBefore(const Hit& left, const Hit& right) { return *left.first < *right.first; }

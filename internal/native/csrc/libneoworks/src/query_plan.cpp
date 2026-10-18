@@ -32,7 +32,7 @@ bool isEqualityTest(const FieldTest& test) {
 }
 
 void addRange(const FieldTest& test, Predicates& predicates) {
-  Bounds& bounds = predicates.ranges[test.ordinal];
+  Bounds& bounds = predicates.ranges[test.path.front()];
   const Comparable* operand = &*test.operands.front();
   bool isLower = test.filterOperator == FilterOperator::Gt || test.filterOperator == FilterOperator::Gte;
   if (isLower && bounds.lower == nullptr) {
@@ -45,8 +45,9 @@ void addRange(const FieldTest& test, Predicates& predicates) {
   }
 }
 
+// Sorted indexes cover the singular fields of a row, so only tests directly on those count.
 void addTest(const FieldTest& test, Predicates& predicates) {
-  if (test.member != kWholeValue) {
+  if (test.path.size() != 1) {
     return;
   }
   if (isEqualityTest(test)) {
@@ -55,7 +56,7 @@ void addTest(const FieldTest& test, Predicates& predicates) {
     if (operand.has_value()) {
       value = &*operand;
     }
-    predicates.equalities.emplace(test.ordinal, value);
+    predicates.equalities.emplace(test.path.front(), value);
     return;
   }
   if (isOrderingTest(test.filterOperator) && !test.insensitive) {
@@ -106,7 +107,7 @@ bool indexOrdersBy(const SortedIndex& index, size_t prefixSize, const std::vecto
   }
   for (size_t position = 0; position < orderBy.size(); ++position) {
     const OrderKey& key = orderBy[position];
-    bool matches = key.member == kWholeValue && key.ordinal == index.fields[prefixSize + position] &&
+    bool matches = key.path.size() == 1 && key.path.front() == index.fields[prefixSize + position] &&
                    key.descending == orderBy.front().descending;
     if (!matches) {
       return false;
