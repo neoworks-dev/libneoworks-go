@@ -101,15 +101,21 @@ Result<SymmetricKey> keyOfFile(const Json& file) {
   return SymmetricKey::fromBytes(*decoded);
 }
 
-// The key text of every stored File by the object id of its original.
-std::map<std::string, std::string> keyTextsByObjectId(const ModelDescriptor& model, const Json& stored) {
-  std::map<std::string, std::string> keyTexts;
-  for (const Json* file : fileValuesOf(model, stored)) {
+void addKeyTexts(const StoredFileContent& source, std::map<std::string, std::string>& keyTexts) {
+  for (const Json* file : fileValuesOf(*source.model, *source.content)) {
     auto objectId = file->find("objectId");
     auto key = file->find("key");
     if (objectId != file->end() && objectId->is_string() && key != file->end() && key->is_string()) {
       keyTexts.emplace(objectId->get_ref<const std::string&>(), key->get_ref<const std::string&>());
     }
+  }
+}
+
+// The key text of every stored File by the object id of its original; the first content to hold an object id decides.
+std::map<std::string, std::string> keyTextsByObjectId(const std::vector<StoredFileContent>& stored) {
+  std::map<std::string, std::string> keyTexts;
+  for (const StoredFileContent& source : stored) {
+    addKeyTexts(source, keyTexts);
   }
   return keyTexts;
 }
@@ -146,9 +152,9 @@ Result<SymmetricKey> findFileKey(const ModelDescriptor& model, const Json& conte
 
 bool holdsFile(const ModelDescriptor& model, const Json& content) { return !fileValuesOf(model, content).empty(); }
 
-Status assignFileKeys(const ModelDescriptor& writtenModel, const ModelDescriptor& storedModel, Json& written,
-                      const Json& stored, CodecError& error) {
-  std::map<std::string, std::string> storedKeyTexts = keyTextsByObjectId(storedModel, stored);
+Status assignFileKeys(const ModelDescriptor& writtenModel, Json& written, const std::vector<StoredFileContent>& stored,
+                      CodecError& error) {
+  std::map<std::string, std::string> storedKeyTexts = keyTextsByObjectId(stored);
   Status status = Status::Ok;
   walkContentLeaves(writtenModel, written, [&](const ValueShape& shape, Json& value, uint32_t) {
     if (shape.kind == ValueKind::File && value.is_object() && status == Status::Ok) {

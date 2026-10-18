@@ -93,8 +93,20 @@ Result<const TableDescriptor*> Client::tableDescriptorFor(const std::string& col
 
 // ── Writes ────────────────────────────────────────────────────────────────────
 
+namespace {
+
+// Whether a file `before` listed is not in `after`: an update replaced or removed it.
+bool dropsFile(const Node& before, const Node& after) {
+  return std::any_of(before.files.begin(), before.files.end(), [&](const NodeFile& file) {
+    return std::find(after.files.begin(), after.files.end(), file) == after.files.end();
+  });
+}
+
+}  // namespace
+
 Result<Json> Client::withFileKeys(const TableDescriptor& table, const TableDescriptor& storedTable,
-                                  const Json& changes, const FacetMap& stored) {
+                                  const Json& changes, const FacetMap& stored,
+                                  const std::vector<StoredContent>& superseded) {
   if (!holdsFile(*table.model, changes)) {
     return changes;
   }
@@ -102,8 +114,12 @@ Result<Json> Client::withFileKeys(const TableDescriptor& table, const TableDescr
   if (!storedContent.ok()) {
     return storedContent.status();
   }
+  std::vector<StoredFileContent> keySources{{storedTable.model, &storedContent.value()}};
+  for (const StoredContent& earlier : superseded) {
+    keySources.push_back({earlier.table->model, &earlier.content});
+  }
   Json keyed = changes;
-  Status assigned = assignFileKeys(*table.model, *storedTable.model, keyed, storedContent.value(), lastContentError_);
+  Status assigned = assignFileKeys(*table.model, keyed, keySources, lastContentError_);
   if (assigned != Status::Ok) {
     return assigned;
   }
@@ -111,8 +127,8 @@ Result<Json> Client::withFileKeys(const TableDescriptor& table, const TableDescr
 }
 
 Result<Json> Client::withKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
-                              const FacetMap& stored) {
-  Result<Json> keyed = withFileKeys(table, storedTable, changes, stored);
+                              const FacetMap& stored, const std::vector<StoredContent>& superseded) {
+  Result<Json> keyed = withFileKeys(table, storedTable, changes, stored, superseded);
   if (!keyed.ok()) {
     return keyed;
   }
@@ -254,7 +270,7 @@ Result<std::string> Client::createRow(const CreateNodeRequest& request) {
   if (attached != Status::Ok) {
     return attached;
   }
-  Result<Json> keyed = withKeys(*table.value(), *table.value(), request.content, FacetMap());
+  Result<Json> keyed = withKeys(*table.value(), *table.value(), request.content, FacetMap(), {});
   if (!keyed.ok()) {
     return keyed.status();
   }
@@ -306,7 +322,11 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   if (moved != Status::Ok) {
     return moved;
   }
-  Result<FacetMap> plaintexts = updatedPlaintexts(plan.value(), request, previous.value());
+  std::vector<StoredContent> superseded;
+  if (holdsFile(*plan.value().writeTable->model, request.changes)) {
+    superseded = supersededContents(request.nodeId, nodeKey.value());
+  }
+  Result<FacetMap> plaintexts = updatedPlaintexts(plan.value(), request, previous.value(), superseded);
   if (!plaintexts.ok()) {
     return plaintexts.status();
   }
@@ -318,7 +338,21 @@ Status Client::updateNode(const UpdateNodeRequest& request) {
   }
   stampSchemaVersion(node, plan.value().writeVersion);
   sealContent(node, nodeKey.value(), plaintexts.value());
+  if (dropsFile(local->node, node)) {
+    database_->saveShadow(local->node);
+  }
   return signAndStore(node);
+}
+
+std::vector<Client::StoredContent> Client::supersededContents(const std::string& nodeId, const SymmetricKey& nodeKey) {
+  std::vector<StoredContent> contents;
+  for (const Node& shadow : database_->shadowsOf(nodeId)) {
+    Result<StoredContent> stored = readStoredContent(shadow, &nodeKey);
+    if (stored.ok()) {
+      contents.push_back(stored.take());
+    }
+  }
+  return contents;
 }
 
 // A given @belongsTo field that names another row moves `node` below it: the row key stays and is

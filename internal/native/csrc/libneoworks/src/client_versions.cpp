@@ -275,8 +275,8 @@ Result<Client::UpdatePlan> Client::planMigration(const Node& node, const TableDe
 }
 
 Result<FacetMap> Client::updatedPlaintexts(const UpdatePlan& plan, const UpdateNodeRequest& request,
-                                           const FacetMap& previous) {
-  Result<Json> keyed = withKeys(*plan.writeTable, *plan.storedTable, request.changes, previous);
+                                           const FacetMap& previous, const std::vector<StoredContent>& superseded) {
+  Result<Json> keyed = withKeys(*plan.writeTable, *plan.storedTable, request.changes, previous, superseded);
   if (!keyed.ok()) {
     return keyed.status();
   }

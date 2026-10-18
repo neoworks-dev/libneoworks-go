@@ -344,6 +344,11 @@ class Client {
   // Whether the row was written below the registered version on an earlier compatibility line.
   bool isOnEarlierLine(const Node& node) const;
   std::set<std::string> versionsBelowRegistered(const std::string& collection) const;
+  // A row's content as stored, Files and references with their keys, and the table it names.
+  struct StoredContent {
+    const TableDescriptor* table = nullptr;
+    Json content;
+  };
   // How a change to a row is written: the stored content is read with `storedTable`, the version
   // that wrote the row, and the new content is encoded with `writeTable` of `writeVersion`.
   struct UpdatePlan {
@@ -355,13 +360,12 @@ class Client {
   };
   Result<UpdatePlan> planUpdate(const Node& node, const UpdateNodeRequest& request);
   Result<UpdatePlan> planMigration(const Node& node, const TableDescriptor& storedTable, const std::string& target);
-  Result<FacetMap> updatedPlaintexts(const UpdatePlan& plan, const UpdateNodeRequest& request, const FacetMap& previous);
+  // `superseded` are the earlier versions of the row, which give back the key of a File an update dropped.
+  Result<FacetMap> updatedPlaintexts(const UpdatePlan& plan, const UpdateNodeRequest& request, const FacetMap& previous,
+                                     const std::vector<StoredContent>& superseded);
+  // The contents of the versions of `nodeId` that updates replaced while dropping a File, read with `nodeKey`.
+  std::vector<StoredContent> supersededContents(const std::string& nodeId, const SymmetricKey& nodeKey);
 
-  // A row's content as stored, Files and references with their keys, and the table it names.
-  struct StoredContent {
-    const TableDescriptor* table = nullptr;
-    Json content;
-  };
   // The table `table` of `collection`; records the reason on failure.
   Result<const TableDescriptor*> tableDescriptorFor(const std::string& collection, const std::string& table);
   // The stored content of the facets this holder can open, or all facets with `nodeKey`.
@@ -369,12 +373,12 @@ class Client {
   // The content as an app sees it: Files without their keys and references as ids.
   Result<Json> readContent(const Node& node, const SymmetricKey* nodeKey);
   // `changes`, in the shape of `table`, with a key in every File value: the stored one when
-  // `stored`, read with `storedTable`, holds the File, else a new one.
+  // `stored`, read with `storedTable`, or a content in `superseded` holds the File, else a new one.
   Result<Json> withFileKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
-                            const FacetMap& stored);
+                            const FacetMap& stored, const std::vector<StoredContent>& superseded);
   // `changes` with the keys of the files and of the referenced rows in it.
   Result<Json> withKeys(const TableDescriptor& table, const TableDescriptor& storedTable, const Json& changes,
-                        const FacetMap& stored);
+                        const FacetMap& stored, const std::vector<StoredContent>& superseded);
   // The key of `rowId` for a reference to it from a new write: a live row this holder can read, of
   // the table `table` names.
   Result<SymmetricKey> referencedRowKey(const std::string& rowId, const std::string& table);
